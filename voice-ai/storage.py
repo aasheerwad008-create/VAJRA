@@ -4,7 +4,6 @@ Uses PostgreSQL via asyncpg with a simple table.
 """
 from __future__ import annotations
 
-import json
 from typing import Optional
 
 import asyncpg

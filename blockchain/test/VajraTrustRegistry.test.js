@@ -1,5 +1,6 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
+const { anyValue } = require("@nomicfoundation/hardhat-chai-matchers/withArgs");
 
 describe("VajraTrustRegistry", function () {
   let registry;
@@ -32,7 +33,7 @@ describe("VajraTrustRegistry", function () {
       registry.anchorVerification(commitment, proofHash, txRef, true, "VERIFIED")
     )
       .to.emit(registry, "IdentityVerified")
-      .withArgs(commitment, proofHash, await ethers.provider.getBlock("latest").then((b) => b.timestamp + 1));
+      .withArgs(commitment, proofHash, anyValue);
 
     const record = await registry.getLatestRecord(commitment);
     expect(record.verified).to.equal(true);

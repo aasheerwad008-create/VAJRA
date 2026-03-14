@@ -207,14 +207,14 @@ func callZKVerify(zkURL string, req VerifyRequest) (*zkVerifyResp, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	resp, err := http.NewRequestWithContext(ctx, http.MethodPost, zkURL+"/api/zk/verify", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, zkURL+"/api/zk/verify", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
-	resp.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	httpResp, err := client.Do(resp)
+	httpResp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, err
 	}

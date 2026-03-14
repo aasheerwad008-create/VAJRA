@@ -60,3 +60,4 @@ logs/
 blockchain/artifacts/
 blockchain/cache/
 blockchain/typechain-types/
+frontend/tsconfig.tsbuildinfo

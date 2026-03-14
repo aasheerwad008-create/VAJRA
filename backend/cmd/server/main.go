@@ -37,6 +37,7 @@ func main() {
 		AdversarialURL:         env("ADVERSARIAL_URL", "http://adversarial-engine:8002"),
 		ZKProofURL:             env("ZK_PROOF_URL", "http://zk-proof-system:8003"),
 		PolygonRPCURL:          env("POLYGON_RPC_URL", "https://rpc-amoy.polygon.technology"),
+		PolygonFallbackRPCURL:  env("POLYGON_FALLBACK_RPC_URL", ""),
 		TrustRegistryAddress:   env("TRUST_REGISTRY_ADDRESS", "0x0000000000000000000000000000000000000000"),
 		RedisURL:               env("REDIS_URL", "redis://redis:6379"),
 	}

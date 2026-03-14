@@ -97,6 +97,130 @@ Solidity smart contract `VajraTrustRegistry` deployed on Polygon Amoy Testnet:
 
 ---
 
+## ML Training
+
+The project includes a production-grade training pipeline for the deepfake detection models using **pretrained + fine-tuning transfer learning**. Both the **Spectrogram Classifier** (EfficientNet-B0) and the **Codec Artifact Detector** (1-D CNN) can be trained on the [ASVspoof 2024](https://www.asvspoof.org/) dataset.
+
+### Training Strategy: Pretrained + Fine-Tuning
+
+The spectrogram model uses **two-stage transfer learning** for faster convergence and better accuracy:
+
+| Stage | Strategy | Learning Rate | Epochs |
+|-------|----------|---------------|--------|
+| Stage 1 | Freeze EfficientNet-B0 backbone (ImageNet weights), train classifier head only | 1e-4 | 10 |
+| Stage 2 | Unfreeze last backbone layers, fine-tune entire network | 1e-5 (backbone), 1e-4 (head) | 5 |
+
+### Training Features
+
+- **Pretrained + fine-tuning** transfer learning (ImageNet → deepfake detection)
+- **Mixed precision training** (torch.cuda.amp) for GPU acceleration
+- **Gradient clipping** for stable training
+- **AdamW** optimizer with cosine-annealing learning rate schedule
+- **Early stopping** to prevent overfitting
+- **Checkpoint management** — saves best model, periodic snapshots, and final weights
+- **Comprehensive metrics** — accuracy, precision, recall, F1, ROC-AUC, EER
+- **Data loader prefetching** with pinned memory for throughput
+- **Advanced augmentations** — Gaussian noise, pitch shift, time stretch, reverb, time masking
+- **Experiment tracking** — JSON-based experiment logs with system metadata
+- **Resume support** — continue training from any checkpoint
+- **Model export** — PyTorch (.pt) and ONNX (.onnx) formats
+
+### Quick Train
+
+```bash
+cd voice-ai
+
+# Train spectrogram model (pretrained + fine-tuning, recommended)
+python train.py --model spectrogram --data-root /data/ASVspoof2024/LA
+
+# Train codec detector
+python train.py --model codec --data-root /data/ASVspoof2024/LA
+
+# Train both models
+python train.py --model all --data-root /data/ASVspoof2024/LA
+
+# Full pipeline: train → evaluate → export
+python train.py --model all --data-root /data/ASVspoof2024/LA --full-pipeline
+
+# Legacy from-scratch training (no pretrained weights)
+python train.py --model spectrogram --data-root /data/ASVspoof2024/LA --no-pretrained --epochs 30
+
+# Resume from a checkpoint
+python train.py --model spectrogram --data-root /data/ASVspoof2024/LA --resume checkpoints/spec_best.pt
+```
+
+### Individual Training Scripts
+
+```bash
+cd voice-ai
+
+# Train spectrogram model with custom stage settings
+python -m training.train_spectrogram --data-root /data/ASVspoof2024/LA \
+    --stage1-epochs 10 --stage2-epochs 5
+
+# Train codec detector
+python -m training.train_codec --data-root /data/ASVspoof2024/LA --epochs 15
+
+# Master pipeline (all steps)
+python -m training.train_all --data-root /data/ASVspoof2024/LA
+
+# Evaluate trained models
+python -m evaluation.evaluate_models --data-root /data/ASVspoof2024/LA \
+    --checkpoint-dir checkpoints
+
+# Export models to PyTorch + ONNX
+python -m export.export_models --checkpoint-dir checkpoints --output-dir models
+```
+
+### Training CLI Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--model` | `all` | `spectrogram`, `codec`, or `all` |
+| `--data-root` | *(required)* | Path to ASVspoof 2024 `LA/` directory |
+| `--epochs` | `30` | Maximum training epochs (legacy mode) |
+| `--batch-size` | `32` | Mini-batch size |
+| `--lr` | `3e-4` | Peak learning rate |
+| `--weight-decay` | `1e-4` | AdamW weight decay |
+| `--checkpoint-dir` | `checkpoints` | Output directory for model weights |
+| `--resume` | — | Path to checkpoint to resume from |
+| `--patience` | `7` | Early-stopping patience (epochs) |
+| `--no-pretrained` | — | Use from-scratch training (legacy mode) |
+| `--full-pipeline` | — | Run train → evaluate → export |
+
+After training, use `python -m export.export_models --checkpoint-dir checkpoints` to convert the trained models to ONNX format for production deployment.
+
+### Training Pipeline Architecture
+
+```
+voice-ai/
+├── datasets/                  # Dataset download & preparation
+│   ├── download_datasets.py   # Multi-dataset download automation
+│   └── dataset_builder.py     # Unified real/fake dataset builder
+├── preprocessing/             # Audio preprocessing
+│   ├── audio_processor.py     # Resample, normalize, trim/pad
+│   ├── spectrogram_generator.py  # 128×128 mel spectrogram
+│   └── augmentations.py       # Noise, pitch, stretch, reverb
+├── models/
+│   ├── spectrogram_model.py   # Pretrained EfficientNet-B0 (freeze/unfreeze)
+│   ├── codec_detector.py      # 1-D CNN codec artifact detector
+│   └── ensemble.py            # Runtime ensemble (unchanged)
+├── training/                  # Training pipeline
+│   ├── trainer.py             # Core engine (AMP, grad clip, early stop)
+│   ├── train_spectrogram.py   # Two-stage transfer learning
+│   ├── train_codec.py         # Codec detector training
+│   └── train_all.py           # Master pipeline script
+├── evaluation/                # Model evaluation
+│   ├── metrics.py             # Accuracy, F1, ROC-AUC, EER
+│   └── evaluate_models.py     # Checkpoint evaluation
+├── experiments/               # Experiment tracking
+│   └── experiment_logger.py   # JSON-based experiment logs
+└── export/                    # Model export
+    └── export_models.py       # PyTorch + ONNX export
+```
+
+---
+
 ## Quick Start
 
 ### Prerequisites
@@ -167,7 +291,9 @@ curl -X POST http://localhost:8001/api/voice/verify \
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/adversarial/perturb-frame` | Apply adversarial perturbation to video frame |
+| `POST` | `/api/adversarial/perturb-frame` | Apply adversarial perturbation to video frame (synchronous) |
+| `POST` | `/api/adversarial/perturb-frame/async` | Submit perturbation job to background queue |
+| `GET` | `/api/adversarial/task/{task_id}` | Poll async task result |
 | `POST` | `/api/liveness/rppg` | rPPG liveness detection from frames |
 
 **Perturb frame:**
@@ -237,6 +363,52 @@ The Next.js dashboard at `http://localhost:3000` provides:
 
 ---
 
+## Infrastructure & Production Hardening
+
+### GPU Acceleration
+
+The `docker-compose.yml` reserves NVIDIA GPUs for compute-heavy AI containers (`voice-ai`, `adversarial-engine`). Docker will gracefully fall back to CPU if no GPU is available.
+
+```yaml
+deploy:
+  resources:
+    reservations:
+      devices:
+        - driver: nvidia
+          count: 1
+          capabilities: [gpu]
+```
+
+### Rate Limiting
+
+The Go backend includes IP-based rate limiting middleware:
+
+| Scope | Limit |
+|-------|-------|
+| Global (all endpoints) | 100 requests/minute per IP |
+| AI-heavy endpoints (`/api/adversarial/*`) | 20 requests/minute per IP |
+
+Exceeding the limit returns `429 Too Many Requests`.
+
+### Blockchain Retry & Fallback RPC
+
+Blockchain anchoring uses **exponential back-off retries** (up to 3 attempts) and supports a **fallback RPC URL** via `POLYGON_FALLBACK_RPC_URL`. If the primary Polygon Amoy endpoint goes down, the system automatically switches to the fallback.
+
+### Async Task Processing
+
+The adversarial engine supports asynchronous processing for heavy compute jobs:
+
+1. Submit a job: `POST /api/adversarial/perturb-frame/async` → returns `{ task_id, status: "queued" }`
+2. Poll for result: `GET /api/adversarial/task/{task_id}` → returns `{ task_id, status, result }`
+
+Tasks are queued in Redis and processed by a background worker. Results expire after 10 minutes.
+
+### Health Check Tuning
+
+AI containers have extended `start_period` values (120s for voice-ai, 60s for adversarial-engine) to allow time for PyTorch model loading before Docker marks them as unhealthy.
+
+---
+
 ## Project Structure
 
 ```
@@ -248,12 +420,16 @@ vajra/
 ├── voice-ai/                   # Layer 1A: AI deepfake detection
 │   ├── Dockerfile
 │   ├── main.py                 # FastAPI service
+│   ├── train.py                # ML training pipeline
 │   ├── schemas.py              # Pydantic models
 │   ├── storage.py              # PostgreSQL embedding store
 │   ├── requirements.txt
-│   └── models/
-│       ├── ensemble.py         # Three-model weighted ensemble
-│       └── speaker.py          # ECAPA-TDNN speaker embedder
+│   ├── models/
+│   │   ├── ensemble.py         # Three-model weighted ensemble
+│   │   ├── speaker.py          # ECAPA-TDNN speaker embedder
+│   │   └── export.py           # ONNX model export utility
+│   └── data/
+│       └── asvspoof.py         # ASVspoof 2024 dataset loader
 │
 ├── adversarial-engine/         # Layer 1B: Adversarial video shield + rPPG
 │   ├── Dockerfile
@@ -317,6 +493,8 @@ vajra/
 - Blockchain records contain only hashes — no PII on-chain
 - JWT authentication on backend API endpoints
 - Docker network isolation between services
+- **IP-based rate limiting** on all endpoints (100 req/min global, 20 req/min for AI endpoints)
+- Environment-driven secret management (`.env` excluded from version control)
 
 ---
 

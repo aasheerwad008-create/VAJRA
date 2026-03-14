@@ -6,13 +6,20 @@ Implements adversarial perturbation algorithms that collapse deepfake generators
   • Adversarial illumination
 
 Also provides rPPG (remote photoplethysmography) liveness detection.
+
+Heavy perturbations (especially PGD with many steps) can be offloaded to a
+background task queue backed by Redis.  Callers may either use the synchronous
+endpoint or submit work via the ``/async`` variant and poll for results.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
+import json
 import os
 import time
+import uuid
 from typing import Any, Dict, List, Optional
 
 import cv2
@@ -41,18 +48,24 @@ app.add_middleware(
 )
 
 _redis: Optional[aioredis.Redis] = None
+_shutdown_event: asyncio.Event = None  # type: ignore[assignment]
 
 
 @app.on_event("startup")
 async def startup():
-    global _redis
+    global _redis, _shutdown_event
     redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
     _redis = aioredis.from_url(redis_url, decode_responses=False)
+    _shutdown_event = asyncio.Event()
+    # Start the background task worker.
+    asyncio.create_task(_task_worker())
     log.info("adversarial_engine.ready")
 
 
 @app.on_event("shutdown")
 async def shutdown():
+    if _shutdown_event is not None:
+        _shutdown_event.set()
     if _redis:
         await _redis.aclose()
 
@@ -76,6 +89,18 @@ class LivenessResponse(BaseModel):
     heart_rate_bpm: float
     liveness_score: float
     verdict: str
+
+
+class AsyncTaskResponse(BaseModel):
+    task_id: str
+    status: str  # "queued" | "processing" | "completed" | "failed"
+
+
+class TaskStatusResponse(BaseModel):
+    task_id: str
+    status: str
+    result: Optional[PerturbResponse] = None
+    error: Optional[str] = None
 
 
 # ── Health ─────────────────────────────────────────────────────────────────
@@ -300,3 +325,149 @@ def _encode_image(img_rgb: np.ndarray) -> str:
     img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
     _, buf = cv2.imencode(".jpg", img_bgr, [cv2.IMWRITE_JPEG_QUALITY, 92])
     return base64.b64encode(bytes(buf)).decode()
+
+
+# ── Async Task Queue ───────────────────────────────────────────────────────
+
+_TASK_QUEUE = "vajra:adversarial:tasks"
+_TASK_RESULT_PREFIX = "vajra:adversarial:result:"
+_TASK_RESULT_TTL = 600  # seconds
+
+
+@app.post("/api/adversarial/perturb-frame/async", response_model=AsyncTaskResponse)
+async def perturb_frame_async(
+    algorithm: str = Form("fgsm"),
+    epsilon: float = Form(0.03),
+    pgd_steps: int = Form(20),
+    frame: UploadFile = File(...),
+) -> AsyncTaskResponse:
+    """
+    Submit a heavy perturbation job to the background task queue.
+    Returns a task_id that can be polled via GET /api/adversarial/task/{task_id}.
+    """
+    if _redis is None:
+        raise HTTPException(status_code=503, detail="Redis unavailable")
+
+    raw = await frame.read()
+    task_id = uuid.uuid4().hex
+
+    payload = json.dumps({
+        "task_id": task_id,
+        "algorithm": algorithm,
+        "epsilon": epsilon,
+        "pgd_steps": pgd_steps,
+        "frame_b64": base64.b64encode(raw).decode(),
+    })
+
+    await _redis.lpush(_TASK_QUEUE, payload)
+    await _redis.set(
+        f"{_TASK_RESULT_PREFIX}{task_id}",
+        json.dumps({"status": "queued"}),
+        ex=_TASK_RESULT_TTL,
+    )
+
+    log.info("adversarial.task_queued", task_id=task_id, algorithm=algorithm)
+    return AsyncTaskResponse(task_id=task_id, status="queued")
+
+
+@app.get("/api/adversarial/task/{task_id}", response_model=TaskStatusResponse)
+async def get_task_status(task_id: str) -> TaskStatusResponse:
+    """Poll for the result of an async perturbation task."""
+    if _redis is None:
+        raise HTTPException(status_code=503, detail="Redis unavailable")
+
+    raw = await _redis.get(f"{_TASK_RESULT_PREFIX}{task_id}")
+    if raw is None:
+        raise HTTPException(status_code=404, detail="Task not found or expired")
+
+    data = json.loads(raw)
+    return TaskStatusResponse(
+        task_id=task_id,
+        status=data.get("status", "unknown"),
+        result=data.get("result"),
+        error=data.get("error"),
+    )
+
+
+async def _task_worker() -> None:
+    """
+    Background coroutine that pulls perturbation tasks from a Redis list and
+    processes them.  Results are stored in Redis keyed by task_id.
+    Exits gracefully when the shutdown event is set.
+    """
+    log.info("adversarial.task_worker.started")
+    while not (_shutdown_event is not None and _shutdown_event.is_set()):
+        try:
+            if _redis is None:
+                await asyncio.sleep(1)
+                continue
+
+            # Blocking pop with 2s timeout so shutdown can be detected.
+            item = await _redis.brpop(_TASK_QUEUE, timeout=2)
+            if item is None:
+                continue
+
+            _, payload_bytes = item
+            payload = json.loads(payload_bytes)
+
+            task_id = payload["task_id"]
+            algorithm = payload["algorithm"].lower()
+            epsilon = payload["epsilon"]
+            pgd_steps = payload["pgd_steps"]
+            frame_bytes = base64.b64decode(payload["frame_b64"])
+
+            # Mark as processing.
+            await _redis.set(
+                f"{_TASK_RESULT_PREFIX}{task_id}",
+                json.dumps({"status": "processing"}),
+                ex=_TASK_RESULT_TTL,
+            )
+
+            t0 = time.perf_counter()
+            img = _decode_image_sync(frame_bytes)
+
+            if algorithm == "fgsm":
+                perturbed, noise_norm = _fgsm(img, epsilon)
+            elif algorithm == "pgd":
+                perturbed, noise_norm = _pgd(img, epsilon, pgd_steps)
+            elif algorithm == "illumination":
+                perturbed, noise_norm = _adversarial_illumination(img, epsilon)
+            else:
+                await _redis.set(
+                    f"{_TASK_RESULT_PREFIX}{task_id}",
+                    json.dumps({"status": "failed", "error": f"Unknown algorithm: {algorithm}"}),
+                    ex=_TASK_RESULT_TTL,
+                )
+                continue
+
+            encoded = _encode_image(perturbed)
+            latency_ms = (time.perf_counter() - t0) * 1000
+
+            result = {
+                "algorithm": algorithm,
+                "epsilon": epsilon,
+                "perturbed_image_b64": encoded,
+                "noise_norm": round(noise_norm, 4),
+                "latency_ms": round(latency_ms, 2),
+            }
+            await _redis.set(
+                f"{_TASK_RESULT_PREFIX}{task_id}",
+                json.dumps({"status": "completed", "result": result}),
+                ex=_TASK_RESULT_TTL,
+            )
+            log.info("adversarial.task_completed", task_id=task_id, latency_ms=round(latency_ms, 2))
+
+        except Exception as exc:
+            log.error("adversarial.task_worker.error", error=str(exc))
+            await asyncio.sleep(1)
+
+    log.info("adversarial.task_worker.stopped")
+
+
+def _decode_image_sync(raw_bytes: bytes) -> np.ndarray:
+    """Non-HTTP variant of _decode_image for use inside the background worker."""
+    arr = np.frombuffer(raw_bytes, dtype=np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValueError("Cannot decode image")
+    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)

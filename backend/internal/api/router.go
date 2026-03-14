@@ -6,6 +6,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -16,13 +17,86 @@ import (
 
 // Config holds all service configuration.
 type Config struct {
-	JWTSecret            string
-	VoiceAIURL           string
-	AdversarialURL       string
-	ZKProofURL           string
-	PolygonRPCURL        string
-	TrustRegistryAddress string
-	RedisURL             string
+	JWTSecret              string
+	VoiceAIURL             string
+	AdversarialURL         string
+	ZKProofURL             string
+	PolygonRPCURL          string
+	PolygonFallbackRPCURL  string
+	TrustRegistryAddress   string
+	RedisURL               string
+}
+
+// ── Rate Limiter ──────────────────────────────────────────────────────────
+
+// ipRateLimiter provides a simple in-memory, IP-based sliding-window rate
+// limiter.  Each IP is allowed `limit` requests per `window`.
+// Expired entries are lazily cleaned up every `window` period.
+type ipRateLimiter struct {
+	mu        sync.Mutex
+	clients   map[string]*clientWindow
+	limit     int
+	window    time.Duration
+	lastClean time.Time
+}
+
+type clientWindow struct {
+	count    int
+	expireAt time.Time
+}
+
+func newIPRateLimiter(limit int, window time.Duration) *ipRateLimiter {
+	return &ipRateLimiter{
+		clients:   make(map[string]*clientWindow),
+		limit:     limit,
+		window:    window,
+		lastClean: time.Now(),
+	}
+}
+
+// allow returns true if the IP has not exceeded the rate limit.
+func (rl *ipRateLimiter) allow(ip string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+
+	// Periodic cleanup: remove expired entries to prevent unbounded growth.
+	if now.Sub(rl.lastClean) > rl.window {
+		for k, v := range rl.clients {
+			if now.After(v.expireAt) {
+				delete(rl.clients, k)
+			}
+		}
+		rl.lastClean = now
+	}
+
+	cw, ok := rl.clients[ip]
+	if !ok || now.After(cw.expireAt) {
+		rl.clients[ip] = &clientWindow{count: 1, expireAt: now.Add(rl.window)}
+		return true
+	}
+	cw.count++
+	return cw.count <= rl.limit
+}
+
+// rateLimitMiddleware returns Gin middleware that rejects requests exceeding
+// the configured rate limit with HTTP 429 Too Many Requests.
+// Emits a CEF security event on rate limit violations for SIEM/SOC visibility.
+func rateLimitMiddleware(rl *ipRateLimiter, log *zap.Logger) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		ip := c.ClientIP()
+		if !rl.allow(ip) {
+			if log != nil {
+				EmitRateLimitExceeded(log, ip, c.Request.URL.Path)
+			}
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+				"error": "rate limit exceeded, try again later",
+			})
+			return
+		}
+		c.Next()
+	}
 }
 
 // NewRouter builds the Gin engine with all routes wired up.
@@ -31,12 +105,19 @@ func NewRouter(log *zap.Logger, pool *pgxpool.Pool, cfg *Config) http.Handler {
 	r := gin.New()
 	r.Use(ginLogger(log), gin.Recovery())
 
+	// Global rate limiter: 100 requests per minute per IP.
+	globalRL := newIPRateLimiter(100, time.Minute)
+	r.Use(rateLimitMiddleware(globalRL, log))
+
 	// ── Health ────────────────────────────────────────────────────────────
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok", "service": "backend"})
 	})
 
 	api := r.Group("/api")
+
+	// Stricter rate limit for compute-heavy AI endpoints: 20 req/min per IP.
+	aiRL := newIPRateLimiter(20, time.Minute)
 
 	// ── Verification pipeline ─────────────────────────────────────────────
 	api.POST("/verify", verifyHandler(log, pool, cfg))
@@ -48,8 +129,11 @@ func NewRouter(log *zap.Logger, pool *pgxpool.Pool, cfg *Config) http.Handler {
 	api.POST("/zk/register", proxyHandler(cfg.ZKProofURL+"/api/zk/register"))
 	api.POST("/zk/verify", proxyHandler(cfg.ZKProofURL+"/api/zk/verify"))
 
-	// ── Adversarial proxy ─────────────────────────────────────────────────
-	api.POST("/adversarial/perturb-frame", proxyMultipartHandler(cfg.AdversarialURL+"/api/adversarial/perturb-frame"))
+	// ── Adversarial proxy (rate-limited) ─────────────────────────────────
+	api.POST("/adversarial/perturb-frame",
+		rateLimitMiddleware(aiRL, log),
+		proxyMultipartHandler(cfg.AdversarialURL+"/api/adversarial/perturb-frame"),
+	)
 
 	return r
 }
@@ -98,7 +182,9 @@ func verifyHandler(log *zap.Logger, pool *pgxpool.Pool, cfg *Config) gin.Handler
 		// ── Step 2: Anchor to blockchain ──────────────────────────────────
 		txHash, err := anchorToBlockchain(cfg, proofHash, req.UserID, req.Verdict)
 		if err != nil {
-			log.Warn("blockchain.anchor_failed", zap.Error(err))
+			logBlockchainFailure(log, err)
+		} else if txHash != "" {
+			EmitBlockchainAnchor(log, req.UserID, txHash, proofHash)
 		}
 
 		// ── Step 3: Persist session ────────────────────────────────────────
@@ -123,6 +209,16 @@ func verifyHandler(log *zap.Logger, pool *pgxpool.Pool, cfg *Config) gin.Handler
 			TxHash:     txHash,
 			Timestamp:  timestamp,
 		})
+
+		// ── CEF Security Events ───────────────────────────────────────────
+		switch req.Verdict {
+		case "VERIFIED":
+			EmitIdentityVerified(log, req.UserID, sessionID, proofHash, req.Verdict, req.TrustScore)
+		case "DEEPFAKE":
+			EmitFraudAttemptDetected(log, req.UserID, sessionID, req.Verdict, req.TrustScore)
+		case "SUSPICIOUS":
+			EmitSuspiciousActivity(log, req.UserID, sessionID, "suspicious_trust_score", req.TrustScore)
+		}
 	}
 }
 

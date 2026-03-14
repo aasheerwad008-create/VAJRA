@@ -1,16 +1,28 @@
 /*!
-VAJRA Zero-Knowledge Proof System
-==================================
-Implements a simulated ZK proof circuit using SHA-256 commitments that proves:
-  - Speaker verification passed (score ≥ threshold)
-  - Liveness detection passed
-  - Private key ownership verified (HMAC-SHA256 signature check)
+VAJRA Zero-Knowledge Proof System — Host
+==========================================
+HTTP service that generates and verifies Fiat-Shamir ZK proofs for
+biometric identity verification.
 
-The proof reveals NO raw biometric data — only a commitment hash and a boolean verdict.
+The host:
+  1. Receives private biometric inputs from the Go backend.
+  2. Executes the ZK circuit (via the `proof` module) to generate a
+     binding commitment and Fiat-Shamir proof.
+  3. Returns the proof (commitment + challenge + response + proof_hash)
+     — **no raw biometric data leaves this service**.
+  4. Provides a /api/zk/verify-proof endpoint for independent proof
+     verification without access to the private witness.
 
-In production this would integrate with RISC Zero zkVM to generate a cryptographic ZK-STARK.
-The current implementation provides the same API surface and commitment scheme.
+Architecture:
+  - `proof.rs` — Fiat-Shamir STARK-like proof engine (prover + verifier)
+  - `main.rs` — Axum HTTP service with Redis-backed session storage
+
+In production, the `proof::prove()` call would be replaced with a
+RISC Zero zkVM execution that produces a STARK receipt.  The API
+surface and proof schema remain identical.
 */
+
+mod proof;
 
 use std::env;
 use std::sync::Arc;
@@ -73,12 +85,45 @@ struct VerifyResponse {
     verdict: String,
     timestamp: String,
     latency_ms: f64,
+    /// Fiat-Shamir proof components — available for independent verification.
+    proof: ProofComponents,
+}
+
+/// Proof components exposed to the verifier.
+#[derive(Debug, Serialize)]
+struct ProofComponents {
+    commitment: String,
+    challenge: String,
+    response: String,
+    proof_type: String,
+}
+
+/// Request body for the /api/zk/verify-proof endpoint.
+#[derive(Debug, Deserialize)]
+struct VerifyProofRequest {
+    commitment: String,
+    challenge: String,
+    response: String,
+    proof_hash: String,
+    nullifier: String,
+    timestamp: String,
+    verified: bool,
+    verdict: String,
+}
+
+/// Response from the /api/zk/verify-proof endpoint.
+#[derive(Debug, Serialize)]
+struct VerifyProofResponse {
+    valid: bool,
+    reason: String,
 }
 
 #[derive(Debug, Serialize)]
 struct HealthResponse {
     status: String,
     service: String,
+    proof_system: String,
+    version: String,
 }
 
 // ── Main ───────────────────────────────────────────────────────────────────
@@ -102,11 +147,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(health_handler))
         .route("/api/zk/register", post(register_handler))
         .route("/api/zk/verify", post(verify_handler))
+        .route("/api/zk/verify-proof", post(verify_proof_handler))
         .layer(cors)
         .with_state(state);
 
     let addr = "0.0.0.0:8003";
-    info!("ZK Proof System listening on {}", addr);
+    info!("ZK Proof System v2.0 (Fiat-Shamir) listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
@@ -119,6 +165,8 @@ async fn health_handler() -> impl IntoResponse {
     Json(HealthResponse {
         status: "ok".to_string(),
         service: "zk-proof-system".to_string(),
+        proof_system: "fiat-shamir-stark".to_string(),
+        version: "2.0.0".to_string(),
     })
 }
 
@@ -143,7 +191,6 @@ async fn register_handler(
     .await
     {
         warn!("redis.store_failed error={}", e);
-        // Non-fatal — continue
     }
 
     (
@@ -160,52 +207,92 @@ async fn verify_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<VerifyRequest>,
 ) -> impl IntoResponse {
-    let t0 = std::time::Instant::now();
-    info!("zk.verify user_id={}", req.user_id);
+    info!("zk.verify user_id={} (Fiat-Shamir proof generation)", req.user_id);
 
-    // ── Circuit constraints ───────────────────────────────────────────────
-    // 1. Speaker score must be ≥ 70
-    let speaker_ok = req.speaker_score >= 70.0;
-    // 2. Liveness score must be ≥ 0.6
-    let liveness_ok = req.liveness_score >= 0.6;
-    // 3. Key proof must be non-empty (in production: verify HMAC)
-    let key_ok = !req.key_proof.is_empty();
-
-    let verified = speaker_ok && liveness_ok && key_ok;
-
-    // ── Generate proof commitment ─────────────────────────────────────────
-    // proof_hash = SHA-256(nullifier || speaker_ok || liveness_ok || key_ok || timestamp)
     let timestamp = Utc::now().to_rfc3339();
-    let proof_input = format!(
-        "{}:{}:{}:{}:{}",
-        req.nullifier,
-        speaker_ok as u8,
-        liveness_ok as u8,
-        key_ok as u8,
-        timestamp
-    );
-    let proof_hash = sha256_hex(&proof_input);
 
-    let verdict = if verified { "VERIFIED" } else { "REJECTED" }.to_string();
+    // ── Build the circuit witness (private inputs) ────────────────────────
+    let witness = proof::CircuitWitness {
+        user_id: req.user_id.clone(),
+        speaker_score: req.speaker_score,
+        liveness_score: req.liveness_score,
+        key_proof: req.key_proof,
+        nullifier: req.nullifier.clone(),
+        timestamp: timestamp.clone(),
+    };
+
+    // ── Generate Fiat-Shamir proof ────────────────────────────────────────
+    let fs_proof = proof::prove(&witness);
+
+    info!(
+        "zk.proof_generated user_id={} verified={} proof_hash={} latency_ms={:.2}",
+        req.user_id, fs_proof.statement.verified, fs_proof.proof_hash, fs_proof.latency_ms
+    );
+
+    // ── Self-verify the proof to ensure correctness ───────────────────────
+    let self_check = proof::verify(&fs_proof);
+    if !self_check.valid {
+        warn!(
+            "zk.self_verify_failed user_id={} reason={}",
+            req.user_id, self_check.reason
+        );
+    }
 
     // Persist proof in Redis
     let redis_key = format!("vajra:zk:proof:{}", req.user_id);
-    let redis_val = format!("{}:{}:{}", proof_hash, verified, timestamp);
+    let redis_val = serde_json::to_string(&fs_proof).unwrap_or_default();
     if let Err(e) = store_in_redis(&state.redis_url, &redis_key, &redis_val).await {
         warn!("redis.store_failed error={}", e);
     }
 
-    let latency_ms = t0.elapsed().as_secs_f64() * 1000.0;
-
     (
         StatusCode::OK,
         Json(VerifyResponse {
-            proof_hash,
+            proof_hash: fs_proof.proof_hash.clone(),
             nullifier: req.nullifier,
-            verified,
-            verdict,
+            verified: fs_proof.statement.verified,
+            verdict: fs_proof.statement.verdict.clone(),
             timestamp,
-            latency_ms,
+            latency_ms: fs_proof.latency_ms,
+            proof: ProofComponents {
+                commitment: fs_proof.commitment,
+                challenge: fs_proof.challenge,
+                response: fs_proof.response,
+                proof_type: "fiat-shamir-stark-v2".to_string(),
+            },
+        }),
+    )
+}
+
+/// Independent proof verification endpoint.
+/// Verifiers can submit proof components and receive a validity check
+/// without needing access to the original private witness.
+async fn verify_proof_handler(
+    Json(req): Json<VerifyProofRequest>,
+) -> impl IntoResponse {
+    info!("zk.verify_proof nullifier={}", req.nullifier);
+
+    let fs_proof = proof::FiatShamirProof {
+        commitment: req.commitment,
+        challenge: req.challenge,
+        response: req.response,
+        statement: proof::CircuitStatement {
+            nullifier: req.nullifier,
+            timestamp: req.timestamp,
+            verified: req.verified,
+            verdict: req.verdict,
+        },
+        proof_hash: req.proof_hash,
+        latency_ms: 0.0,
+    };
+
+    let result = proof::verify(&fs_proof);
+
+    (
+        StatusCode::OK,
+        Json(VerifyProofResponse {
+            valid: result.valid,
+            reason: result.reason,
         }),
     )
 }

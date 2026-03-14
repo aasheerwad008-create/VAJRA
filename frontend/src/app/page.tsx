@@ -10,6 +10,7 @@ import QRCertificate from "@/components/QRCertificate";
 import VideoShield from "@/components/VideoShield";
 import DemoController from "@/components/DemoController";
 import StatusBar from "@/components/StatusBar";
+import RedVsBlue from "@/components/RedVsBlue";
 import { useVoiceStream } from "@/hooks/useVoiceStream";
 import type { VerificationState } from "@/types";
 
@@ -181,12 +182,25 @@ export default function Dashboard() {
           <BlockchainLedger txHash={verificationState.txHash} />
         </motion.div>
 
-        {/* Demo Controller */}
+        {/* Red vs Blue — Attack vs Defense Battle */}
+        <motion.div
+          className="col-span-12 bg-vajra-800/50 border border-vajra-600/30 rounded-xl p-6"
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.38 }}
+        >
+          <h2 className="text-xs tracking-widest text-gray-400 mb-4 uppercase">
+            ⚔️ Red vs Blue — Live Attack Simulation
+          </h2>
+          <RedVsBlue />
+        </motion.div>
+
+        {/* Demo Attack Scenarios */}
         <motion.div
           className="col-span-12 md:col-span-6 bg-vajra-800/50 border border-vajra-600/30 rounded-xl p-6"
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.38 }}
+          transition={{ delay: 0.42 }}
         >
           <h2 className="text-xs tracking-widest text-gray-400 mb-4 uppercase">
             Demo Attack Scenarios

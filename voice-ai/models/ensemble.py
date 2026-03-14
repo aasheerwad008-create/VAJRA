@@ -28,9 +28,14 @@ CHUNK_SAMPLES = SAMPLE_RATE * 2  # 2-second window
 
 # ── Model 1: Deepfake Spectrogram Classifier ───────────────────────────────
 class SpectrogramClassifier(nn.Module):
-    """EfficientNet-B0 fine-tuned on mel-spectrograms for REAL/FAKE detection."""
+    """EfficientNet-B0 on mel-spectrograms for REAL/FAKE detection.
 
-    def __init__(self) -> None:
+    Supports pretrained ImageNet initialization for transfer learning.
+    See ``models.spectrogram_model.SpectrogramModel`` for the full
+    two-stage freeze/unfreeze training wrapper.
+    """
+
+    def __init__(self, pretrained: bool = False) -> None:
         super().__init__()
         import timm
 
@@ -42,7 +47,9 @@ class SpectrogramClassifier(nn.Module):
         )
         self.amp_to_db = T.AmplitudeToDB()
 
-        backbone = timm.create_model("efficientnet_b0", pretrained=False, num_classes=2)
+        backbone = timm.create_model(
+            "efficientnet_b0", pretrained=pretrained, num_classes=2,
+        )
         # Adapt first conv for single-channel input
         old_conv = backbone.conv_stem
         backbone.conv_stem = nn.Conv2d(

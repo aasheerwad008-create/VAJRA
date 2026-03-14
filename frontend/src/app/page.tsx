@@ -1,13 +1,14 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import ThreatGauge from "@/components/ThreatGauge";
-import SpectrogramView from "@/components/SpectrogramView";
-import ZKProofStatus from "@/components/ZKProofStatus";
-import BlockchainExplorer from "@/components/BlockchainExplorer";
+import ThreatScore from "@/components/ThreatScore";
+import VoiceEngine from "@/components/VoiceEngine";
+import ZKAttestation from "@/components/ZKAttestation";
+import BlockchainLedger from "@/components/BlockchainLedger";
 import QRCertificate from "@/components/QRCertificate";
-import VideoFeed from "@/components/VideoFeed";
+import VideoShield from "@/components/VideoShield";
+import DemoController from "@/components/DemoController";
 import StatusBar from "@/components/StatusBar";
 import { useVoiceStream } from "@/hooks/useVoiceStream";
 import type { VerificationState } from "@/types";
@@ -83,7 +84,7 @@ export default function Dashboard() {
           <h2 className="text-xs tracking-widest text-gray-400 mb-4 uppercase">
             Trust Score
           </h2>
-          <ThreatGauge score={verificationState.trustScore} verdict={verificationState.verdict} />
+          <ThreatScore score={verificationState.trustScore} verdict={verificationState.verdict} />
           <div className="mt-4 text-center">
             <AnimatePresence mode="wait">
               <motion.div
@@ -128,7 +129,14 @@ export default function Dashboard() {
           <h2 className="text-xs tracking-widest text-gray-400 mb-4 uppercase">
             Live Spectrogram
           </h2>
-          <SpectrogramView isActive={isStreaming} audioLevel={audioLevel} />
+          <VoiceEngine
+            isStreaming={isStreaming}
+            audioLevel={audioLevel}
+            trustScore={verificationState.trustScore}
+            verdict={verificationState.verdict}
+            onStart={startStream}
+            onStop={stopStream}
+          />
         </motion.div>
 
         {/* Video Feed */}
@@ -141,7 +149,7 @@ export default function Dashboard() {
           <h2 className="text-xs tracking-widest text-gray-400 mb-4 uppercase">
             Video Feed — Adversarial Shield
           </h2>
-          <VideoFeed />
+          <VideoShield />
         </motion.div>
 
         {/* ZK Proof Status */}
@@ -154,7 +162,7 @@ export default function Dashboard() {
           <h2 className="text-xs tracking-widest text-gray-400 mb-4 uppercase">
             ZK Proof
           </h2>
-          <ZKProofStatus
+          <ZKAttestation
             proofHash={verificationState.proofHash}
             isVerified={verificationState.verdict === "VERIFIED"}
           />
@@ -170,7 +178,20 @@ export default function Dashboard() {
           <h2 className="text-xs tracking-widest text-gray-400 mb-4 uppercase">
             Chain Anchor
           </h2>
-          <BlockchainExplorer txHash={verificationState.txHash} />
+          <BlockchainLedger txHash={verificationState.txHash} />
+        </motion.div>
+
+        {/* Demo Controller */}
+        <motion.div
+          className="col-span-12 md:col-span-6 bg-vajra-800/50 border border-vajra-600/30 rounded-xl p-6"
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.38 }}
+        >
+          <h2 className="text-xs tracking-widest text-gray-400 mb-4 uppercase">
+            Demo Attack Scenarios
+          </h2>
+          <DemoController />
         </motion.div>
 
         {/* QR Certificate */}

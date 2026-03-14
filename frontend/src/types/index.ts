@@ -32,3 +32,25 @@ export interface VerifyAPIResponse {
   tx_hash?: string;
   timestamp: string;
 }
+
+// Aliases used by lib/api.ts
+export type VerifyResponse = VerifyAPIResponse;
+
+export interface VerifyRequest {
+  user_id: string;
+  audio_data?: string;   // Base64-encoded audio blob
+  key_proof?: string;    // HMAC-SHA256 key-possession proof
+  proof_hash?: string;   // Nullifier from previous session (for replay detection)
+  liveness_score?: number;
+  trust_score?: number;
+}
+
+export interface SessionStatus {
+  session_id: string;
+  status: "pending" | "processing" | "completed" | "failed";
+  verdict?: string;
+  trust_score?: number;
+  proof_hash?: string;
+  created_at: string;
+  updated_at: string;
+}

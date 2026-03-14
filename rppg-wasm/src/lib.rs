@@ -44,6 +44,12 @@ pub struct RppgResult {
     pub frames_buffered: usize,
     /// True when enough frames have been buffered for a reliable estimate.
     pub ready: bool,
+    /// Virtual camera detection flag.  True if the frame exhibits
+    /// characteristics consistent with synthetic/virtual camera sources
+    /// (OBS Virtual Cam, ManyCam, etc.).
+    pub virtual_camera_detected: bool,
+    /// Confidence that the source is a virtual camera [0, 1].
+    pub virtual_camera_score: f64,
 }
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -58,6 +64,12 @@ const FREQ_MIN: f64 = 0.7;   // 42 BPM
 const FREQ_MAX: f64 = 4.0;   // 240 BPM
 /// Max gap between consecutive frames before resetting (seconds).
 const MAX_FRAME_GAP_S: f64 = 3.0;
+/// Threshold for pixel variance below which the frame is considered synthetic.
+const VIRTUAL_CAM_VARIANCE_THRESHOLD: f64 = 2.0;
+/// Number of recent timing deltas to track for jitter analysis.
+const TIMING_WINDOW: usize = 30;
+/// If frame timing jitter (std dev) is below this, suspect virtual camera.
+const JITTER_THRESHOLD: f64 = 0.0005;
 
 // ── Analyser ───────────────────────────────────────────────────────────────
 
@@ -72,6 +84,14 @@ pub struct RppgAnalyser {
     cursor: usize,
     /// Total frames processed since the last reset.
     total_frames: usize,
+    /// Recent frame-to-frame timing deltas for jitter analysis.
+    timing_deltas: Vec<f64>,
+    /// Running count of frames flagged as potentially synthetic.
+    synthetic_frame_count: usize,
+    /// Previous frame's RGB signature for duplicate detection.
+    prev_rgb: (f64, f64, f64),
+    /// Count of consecutive duplicate frames.
+    duplicate_count: usize,
 }
 
 #[wasm_bindgen]
@@ -84,6 +104,10 @@ impl RppgAnalyser {
             last_timestamp_s: -1.0,
             cursor: 0,
             total_frames: 0,
+            timing_deltas: Vec::with_capacity(TIMING_WINDOW),
+            synthetic_frame_count: 0,
+            prev_rgb: (-1.0, -1.0, -1.0),
+            duplicate_count: 0,
         }
     }
 
@@ -93,6 +117,10 @@ impl RppgAnalyser {
         self.last_timestamp_s = -1.0;
         self.cursor = 0;
         self.total_frames = 0;
+        self.timing_deltas.clear();
+        self.synthetic_frame_count = 0;
+        self.prev_rgb = (-1.0, -1.0, -1.0);
+        self.duplicate_count = 0;
     }
 
     /**
@@ -122,6 +150,68 @@ impl RppgAnalyser {
         {
             self.reset();
         }
+
+        // ── Virtual Camera Detection ──────────────────────────────────────
+        // Track frame timing jitter — real cameras have natural variance in
+        // inter-frame timing, while virtual cameras (OBS, ManyCam) produce
+        // perfectly uniform timing from software clocks.
+        if self.last_timestamp_s > 0.0 {
+            let delta = timestamp_s - self.last_timestamp_s;
+            if self.timing_deltas.len() >= TIMING_WINDOW {
+                self.timing_deltas.remove(0);
+            }
+            self.timing_deltas.push(delta);
+        }
+
+        // Detect exact duplicate frames — real cameras never produce
+        // identical consecutive mean RGB values due to sensor noise.
+        let is_exact_duplicate = (r - self.prev_rgb.0).abs() < 1e-10
+            && (g - self.prev_rgb.1).abs() < 1e-10
+            && (b - self.prev_rgb.2).abs() < 1e-10
+            && self.prev_rgb.0 >= 0.0;
+        if is_exact_duplicate {
+            self.duplicate_count += 1;
+        } else {
+            self.duplicate_count = self.duplicate_count.saturating_sub(1);
+        }
+        self.prev_rgb = (r, g, b);
+
+        // Detect unnaturally low pixel variance — synthetic frames from
+        // virtual cameras often have very uniform color distributions.
+        let channel_variance = ((r - g).powi(2) + (g - b).powi(2) + (r - b).powi(2)) / 3.0;
+        if channel_variance < VIRTUAL_CAM_VARIANCE_THRESHOLD && self.total_frames > 10 {
+            self.synthetic_frame_count += 1;
+        }
+
+        // Compute timing jitter (standard deviation of frame deltas).
+        let timing_jitter = if self.timing_deltas.len() >= 10 {
+            let mean_delta: f64 = self.timing_deltas.iter().sum::<f64>()
+                / self.timing_deltas.len() as f64;
+            let variance: f64 = self.timing_deltas.iter()
+                .map(|d| (d - mean_delta).powi(2))
+                .sum::<f64>() / self.timing_deltas.len() as f64;
+            variance.sqrt()
+        } else {
+            1.0 // assume real camera until enough data
+        };
+
+        // Combine heuristics into a virtual camera score [0, 1].
+        let jitter_score = if timing_jitter < JITTER_THRESHOLD { 0.4 } else { 0.0 };
+        let dup_ratio = if self.total_frames > 10 {
+            (self.duplicate_count as f64 / self.total_frames.min(60) as f64).min(1.0)
+        } else {
+            0.0
+        };
+        let dup_score = dup_ratio * 0.3;
+        let synth_ratio = if self.total_frames > 10 {
+            (self.synthetic_frame_count as f64 / self.total_frames as f64).min(1.0)
+        } else {
+            0.0
+        };
+        let synth_score = synth_ratio * 0.3;
+        let virtual_camera_score = (jitter_score + dup_score + synth_score).min(1.0);
+        let virtual_camera_detected = virtual_camera_score > 0.5;
+
         self.last_timestamp_s = timestamp_s;
 
         // CHROM method: use a chrominance-based signal to suppress illumination
@@ -148,10 +238,12 @@ impl RppgAnalyser {
             signal_quality,
             frames_buffered,
             ready,
+            virtual_camera_detected,
+            virtual_camera_score,
         };
 
         serde_json::to_string(&result).unwrap_or_else(|_| {
-            r#"{"heart_rate_bpm":0,"liveness_score":0,"signal_quality":0,"frames_buffered":0,"ready":false}"#
+            r#"{"heart_rate_bpm":0,"liveness_score":0,"signal_quality":0,"frames_buffered":0,"ready":false,"virtual_camera_detected":false,"virtual_camera_score":0}"#
                 .to_string()
         })
     }
@@ -342,6 +434,50 @@ mod tests {
         assert!(
             (estimated_bpm - bpm).abs() < 10.0,
             "expected ~{bpm} BPM, got {estimated_bpm}"
+        );
+    }
+
+    #[test]
+    fn test_virtual_camera_detection_duplicate_frames() {
+        let mut analyser = RppgAnalyser::new();
+        // Feed identical frames with perfectly uniform timing — this mimics
+        // a virtual camera piping synthetic frames.
+        for i in 0..60 {
+            let t = i as f64 / FPS;
+            // Exact same RGB every frame
+            analyser.process_frame(128.0, 128.0, 128.0, t);
+        }
+        let json = analyser.process_frame(128.0, 128.0, 128.0, 60.0 / FPS);
+        let result: RppgResult = serde_json::from_str(&json).unwrap();
+        // With identical frames and uniform timing, virtual camera score should be elevated
+        assert!(
+            result.virtual_camera_score > 0.0,
+            "duplicate frames should raise virtual_camera_score, got {}",
+            result.virtual_camera_score
+        );
+    }
+
+    #[test]
+    fn test_real_camera_not_flagged() {
+        let mut analyser = RppgAnalyser::new();
+        // Simulate a real camera with natural variation in RGB and timing
+        for i in 0..60 {
+            // Natural timing jitter (±2ms)
+            let jitter = (i as f64 * 0.7).sin() * 0.002;
+            let t = i as f64 / FPS + jitter;
+            // Natural sensor noise in RGB values
+            let noise = (i as f64 * 1.3).sin() * 5.0;
+            let r = 120.0 + noise;
+            let g = 140.0 + noise * 0.8;
+            let b = 100.0 - noise * 0.5;
+            analyser.process_frame(r, g, b, t);
+        }
+        let json = analyser.process_frame(125.0, 142.0, 98.0, 61.0 / FPS);
+        let result: RppgResult = serde_json::from_str(&json).unwrap();
+        assert!(
+            !result.virtual_camera_detected,
+            "real camera should not be flagged, score={}",
+            result.virtual_camera_score
         );
     }
 }

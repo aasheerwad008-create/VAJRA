@@ -82,10 +82,14 @@ func (rl *ipRateLimiter) allow(ip string) bool {
 
 // rateLimitMiddleware returns Gin middleware that rejects requests exceeding
 // the configured rate limit with HTTP 429 Too Many Requests.
-func rateLimitMiddleware(rl *ipRateLimiter) gin.HandlerFunc {
+// Emits a CEF security event on rate limit violations for SIEM/SOC visibility.
+func rateLimitMiddleware(rl *ipRateLimiter, log *zap.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ip := c.ClientIP()
 		if !rl.allow(ip) {
+			if log != nil {
+				EmitRateLimitExceeded(log, ip, c.Request.URL.Path)
+			}
 			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
 				"error": "rate limit exceeded, try again later",
 			})
@@ -103,7 +107,7 @@ func NewRouter(log *zap.Logger, pool *pgxpool.Pool, cfg *Config) http.Handler {
 
 	// Global rate limiter: 100 requests per minute per IP.
 	globalRL := newIPRateLimiter(100, time.Minute)
-	r.Use(rateLimitMiddleware(globalRL))
+	r.Use(rateLimitMiddleware(globalRL, log))
 
 	// ── Health ────────────────────────────────────────────────────────────
 	r.GET("/health", func(c *gin.Context) {
@@ -127,7 +131,7 @@ func NewRouter(log *zap.Logger, pool *pgxpool.Pool, cfg *Config) http.Handler {
 
 	// ── Adversarial proxy (rate-limited) ─────────────────────────────────
 	api.POST("/adversarial/perturb-frame",
-		rateLimitMiddleware(aiRL),
+		rateLimitMiddleware(aiRL, log),
 		proxyMultipartHandler(cfg.AdversarialURL+"/api/adversarial/perturb-frame"),
 	)
 
@@ -179,6 +183,8 @@ func verifyHandler(log *zap.Logger, pool *pgxpool.Pool, cfg *Config) gin.Handler
 		txHash, err := anchorToBlockchain(cfg, proofHash, req.UserID, req.Verdict)
 		if err != nil {
 			logBlockchainFailure(log, err)
+		} else if txHash != "" {
+			EmitBlockchainAnchor(log, req.UserID, txHash, proofHash)
 		}
 
 		// ── Step 3: Persist session ────────────────────────────────────────
@@ -203,6 +209,16 @@ func verifyHandler(log *zap.Logger, pool *pgxpool.Pool, cfg *Config) gin.Handler
 			TxHash:     txHash,
 			Timestamp:  timestamp,
 		})
+
+		// ── CEF Security Events ───────────────────────────────────────────
+		switch req.Verdict {
+		case "VERIFIED":
+			EmitIdentityVerified(log, req.UserID, sessionID, proofHash, req.Verdict, req.TrustScore)
+		case "DEEPFAKE":
+			EmitFraudAttemptDetected(log, req.UserID, sessionID, req.Verdict, req.TrustScore)
+		case "SUSPICIOUS":
+			EmitSuspiciousActivity(log, req.UserID, sessionID, "suspicious_trust_score", req.TrustScore)
+		}
 	}
 }
 

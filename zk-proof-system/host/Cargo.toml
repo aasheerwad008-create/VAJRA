@@ -1,8 +1,8 @@
 [package]
 name = "zk-proof-system"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2021"
-description = "VAJRA ZK Proof Host — HTTP server that generates and verifies ZK identity proofs"
+description = "VAJRA ZK Proof Host — HTTP server that generates and verifies ZK identity proofs using Fiat-Shamir STARK-like proofs"
 
 [[bin]]
 name = "zk-proof-system"
@@ -18,6 +18,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sha2 = "0.10"
 hex = "0.4"
+hmac = "0.12"
 uuid = { version = "1", features = ["v4"] }
 redis = { version = "0.25", features = ["tokio-comp"] }
 reqwest = { version = "0.12", features = ["json"] }

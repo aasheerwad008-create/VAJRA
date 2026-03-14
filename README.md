@@ -97,7 +97,80 @@ Solidity smart contract `VajraTrustRegistry` deployed on Polygon Amoy Testnet:
 
 ---
 
-## ML Training
+## Pretrained Weights
+
+VAJRA ships with a **pretrained weight management system** that downloads and verifies all model weights in one step. **Training is optional** — the pretrained weights provide a fully functional deepfake detection pipeline out of the box.
+
+### Do I Need to Train?
+
+**No.** The pretrained weights are sufficient for production use:
+
+| Model | Pretrained Source | Status |
+|-------|------------------|--------|
+| Spectrogram Classifier | EfficientNet-B0 (ImageNet-1K via timm) | ✅ Ready to use |
+| Speaker Verification | ECAPA-TDNN (VoxCeleb1+2 via SpeechBrain) | ✅ Ready to use |
+| Codec Artifact Detector | Kaiming initialisation | ⚡ Trained from scratch |
+| RawNet2 | Kaiming initialisation | ⚡ Trained from scratch |
+
+> **When should you train?** Only if you need to fine-tune the models on your own dataset (e.g. custom audio domains, additional codec types, or domain-specific deepfake patterns).
+
+### Download Pretrained Weights
+
+```bash
+cd voice-ai
+
+# Download all pretrained weights (~100 MB total)
+python -m pretrained.setup_weights
+
+# Check what's cached
+python -m pretrained.setup_weights --status
+
+# Show full registry info
+python -m pretrained.setup_weights --info
+
+# Force re-download
+python -m pretrained.setup_weights --force
+
+# Custom cache directory
+python -m pretrained.setup_weights --model-dir /path/to/weights
+```
+
+### Weight Registry
+
+The registry tracks every pretrained weight source with SHA-256 checksums:
+
+| Weight | Model | Source | Size | Trainable |
+|--------|-------|--------|------|-----------|
+| `efficientnet_b0_imagenet` | SpectrogramModel | timm (ImageNet-1K) | 20.5 MB | Yes (fine-tune) |
+| `ecapa_tdnn_voxceleb` | ECAPATDNNClassifier | SpeechBrain (VoxCeleb) | 83.0 MB | No (frozen) |
+| `ecapa_tdnn_speaker_embedder` | SpeakerEmbedder | SpeechBrain (VoxCeleb) | 83.0 MB | No (frozen) |
+| `rawnet2_init` | RawNet2 | Kaiming init | 0 MB | Yes (scratch) |
+| `codec_detector_init` | CodecDetectorModel | Kaiming init | 0 MB | Yes (scratch) |
+
+### Programmatic Access
+
+```python
+from pretrained import WeightRegistry, download_weights, verify_weights
+
+registry = WeightRegistry()
+
+# List all weights
+for entry in registry.list_all():
+    print(f"{entry.name}: {entry.source_type} ({entry.file_size_mb:.1f} MB)")
+
+# Download a specific weight
+entry = registry.get("efficientnet_b0_imagenet")
+download_weights(entry, model_dir=Path("./weights"))
+
+# Verify integrity
+assert verify_weights(entry, model_dir=Path("./weights"))
+```
+
+---
+
+## ML Training (Optional)
+
+> **Note:** Training is optional. The pretrained weights above provide a fully functional pipeline. Train only if you need to fine-tune on custom data.
 
 The project includes a production-grade training pipeline for the deepfake detection models using **pretrained + fine-tuning transfer learning**. Both the **Spectrogram Classifier** (EfficientNet-B0) and the **Codec Artifact Detector** (1-D CNN) can be trained on the [ASVspoof 2024](https://www.asvspoof.org/) dataset.
 
@@ -223,6 +296,8 @@ voice-ai/
 
 ## Quick Start
 
+> **📖 For a comprehensive setup guide** (local development, per-component instructions, troubleshooting), see **[SETUP.md](SETUP.md)**.
+
 ### Prerequisites
 
 - Docker 24+ and Docker Compose v2
@@ -251,7 +326,17 @@ The full platform will start. Services come up in dependency order:
 | Adversarial Engine | http://localhost:8002 |
 | ZK Proof System | http://localhost:8003 |
 
-### 3. (Optional) Deploy smart contract
+### 3. (Optional) Download pretrained weights locally
+
+> When using Docker, pretrained weights are downloaded automatically inside the container. For **local development**, run:
+
+```bash
+cd voice-ai
+pip install -r requirements.txt
+python -m pretrained.setup_weights
+```
+
+### 4. (Optional) Deploy smart contract
 
 ```bash
 cd blockchain
@@ -424,6 +509,10 @@ vajra/
 │   ├── schemas.py              # Pydantic models
 │   ├── storage.py              # PostgreSQL embedding store
 │   ├── requirements.txt
+│   ├── pretrained/
+│   │   ├── registry.py         # Weight catalogue (sources, checksums)
+│   │   ├── downloader.py       # Download & verify pretrained weights
+│   │   └── setup_weights.py    # CLI: python -m pretrained.setup_weights
 │   ├── models/
 │   │   ├── ensemble.py         # Three-model weighted ensemble
 │   │   ├── speaker.py          # ECAPA-TDNN speaker embedder

@@ -35,6 +35,9 @@ models/*.onnx
 models/manifest.json
 *.safetensors
 
+# Pretrained weight cache
+weights/
+
 # Training artifacts
 checkpoints/
 experiments/logs/

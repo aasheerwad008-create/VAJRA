@@ -140,7 +140,7 @@ class SpectrogramModel(nn.Module):
             param.requires_grad = False
 
         # Unfreeze blocks from unfreeze_from onwards
-        blocks = list(self.backbone.blocks.children()) if hasattr(self.backbone, 'blocks') else []
+        blocks = list(self.backbone.blocks) if hasattr(self.backbone, 'blocks') else []
         for i, block in enumerate(blocks):
             if i >= unfreeze_from:
                 for param in block.parameters():

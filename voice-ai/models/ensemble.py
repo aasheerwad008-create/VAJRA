@@ -6,7 +6,9 @@ Combines three models into a weighted trust score:
   - Model 2: Neural Codec Artifact Detector  (1-D CNN on raw waveform)
   - Model 3: Speaker Verification            (ECAPA-TDNN cosine similarity)
 
-Plus an rPPG liveness placeholder (returns fixed 0.8 in audio-only mode).
+Plus an audio-based liveness estimator that analyses signal energy,
+zero-crossing rate, and spectral flatness to detect silence, constant
+tones, or synthetic signals that lack the natural variation of live speech.
 """
 from __future__ import annotations
 
@@ -146,8 +148,10 @@ class EnsembleClassifier:
             p_speaker = float(_cosine_sim(live_emb, enrolled_embedding))
             p_speaker = max(0.0, min(1.0, p_speaker))
 
-        # rPPG liveness (audio-only placeholder — 0.8)
-        p_liveness = 0.8
+        # Audio-based liveness estimation — analyses signal characteristics
+        # to detect silence, constant tones, or synthetic signals that lack
+        # the natural variation of live speech.
+        p_liveness = _audio_liveness(waveform)
 
         # Weighted trust score 0-100
         raw = (
@@ -191,3 +195,63 @@ def _cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
     a = a / (np.linalg.norm(a) + 1e-8)
     b = b / (np.linalg.norm(b) + 1e-8)
     return float(np.dot(a, b))
+
+
+def _audio_liveness(waveform: np.ndarray) -> float:
+    """Estimate liveness from audio signal characteristics.
+
+    Analyses three features of the waveform:
+      1. **RMS energy** — prolonged silence across the entire analysed window
+         indicates a non-live source (momentary pauses within speech are
+         naturally averaged out by the 2-second sliding window).
+      2. **Zero-crossing rate (ZCR)** — live speech exhibits moderate ZCR;
+         pure tones or constant signals have extremely low or high ZCR.
+      3. **Spectral flatness** — a perfectly flat spectrum (white noise) or a
+         single-frequency tone both score poorly; natural speech sits between.
+
+    Each feature produces a sub-score in [0, 1] and the final liveness is the
+    average, clamped to [0, 1].
+    """
+    eps = 1e-8
+    n = len(waveform)
+    if n < 2:
+        return 0.0
+
+    wav = waveform.astype(np.float64)
+
+    # ── 1. RMS energy score ──────────────────────────────────────────────
+    rms = float(np.sqrt(np.mean(wav ** 2)))
+    # Map RMS to [0, 1] via a sigmoid-like curve; centre at 0.02 RMS.
+    energy_score = min(1.0, rms / 0.02) if rms > eps else 0.0
+
+    # ── 2. Zero-crossing rate score ──────────────────────────────────────
+    sign_changes = np.abs(np.diff(np.sign(wav)))
+    zcr = float(np.sum(sign_changes > 0)) / (n - 1)
+    # Speech ZCR typically falls in [0.02, 0.20]; penalise extremes.
+    if zcr < 0.005:
+        zcr_score = 0.1           # nearly DC / silence
+    elif zcr < 0.02:
+        zcr_score = 0.5
+    elif zcr <= 0.25:
+        zcr_score = 1.0           # healthy speech range
+    elif zcr <= 0.40:
+        zcr_score = 0.5
+    else:
+        zcr_score = 0.2           # likely noise
+
+    # ── 3. Spectral flatness score ───────────────────────────────────────
+    spectrum = np.abs(np.fft.rfft(wav))
+    spectrum = spectrum + eps  # avoid log(0)
+    geo_mean = float(np.exp(np.mean(np.log(spectrum))))
+    arith_mean = float(np.mean(spectrum))
+    flatness = geo_mean / (arith_mean + eps)
+    # Speech flatness is typically 0.01–0.3; pure tone → 0, white noise → 1.
+    if flatness < 0.001:
+        sf_score = 0.2            # pure tone / silence
+    elif flatness < 0.5:
+        sf_score = 1.0            # natural speech range
+    else:
+        sf_score = max(0.2, 1.0 - flatness)  # increasingly noisy
+
+    liveness = (energy_score + zcr_score + sf_score) / 3.0
+    return max(0.0, min(1.0, liveness))

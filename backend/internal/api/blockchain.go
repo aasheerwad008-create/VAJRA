@@ -3,10 +3,12 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"time"
 
+	"github.com/vajra/backend/internal/polygon"
 	"go.uber.org/zap"
 )
 
@@ -54,8 +56,10 @@ func anchorToBlockchain(cfg *Config, proofHash, userID, verdict string) (string,
 func anchorWithRetry(rpcURL, contractAddress, proofHash, userID, verdict string) (string, error) {
 	var lastErr error
 	for attempt := 0; attempt < maxRetries; attempt++ {
-		client := NewPolygonClient(rpcURL, contractAddress)
-		txHash, err := client.AnchorProof(proofHash, userID, verdict)
+		client := polygon.NewClient(rpcURL, contractAddress)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		txHash, err := client.AnchorProof(ctx, proofHash, userID, verdict)
+		cancel()
 		if err == nil {
 			return txHash, nil
 		}
@@ -69,34 +73,6 @@ func anchorWithRetry(rpcURL, contractAddress, proofHash, userID, verdict string)
 		time.Sleep(delay)
 	}
 	return "", fmt.Errorf("all %d attempts failed: %w", maxRetries, lastErr)
-}
-
-// PolygonClient is a minimal JSON-RPC client for interacting with the
-// KavachaTrustRegistry contract on Polygon Amoy.
-type PolygonClient struct {
-	rpcURL          string
-	contractAddress string
-}
-
-// NewPolygonClient constructs a PolygonClient.
-func NewPolygonClient(rpcURL, contractAddress string) *PolygonClient {
-	return &PolygonClient{
-		rpcURL:          rpcURL,
-		contractAddress: contractAddress,
-	}
-}
-
-// AnchorProof sends an anchorVerification transaction to the trust registry.
-//
-// Returns the transaction hash on success.
-// In the current implementation a deterministic placeholder hash is returned
-// to allow the rest of the pipeline to function while a full ethclient
-// integration is being wired up (see internal/polygon for the full client).
-func (c *PolygonClient) AnchorProof(proofHash, userID, verdict string) (string, error) {
-	// TODO: replace with full ethclient call once contract ABI is confirmed:
-	//   contract.AnchorVerification(identityCommitment, proofHash32, txRef, verified, verdict)
-	txHash := fmt.Sprintf("0x%064x", time.Now().UnixNano())
-	return txHash, nil
 }
 
 // logBlockchainFailure is a helper used by the verify handler to log

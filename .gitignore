@@ -1,0 +1,62 @@
+# Node / Frontend
+node_modules/
+.next/
+dist/
+build/
+*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Rust
+target/
+Cargo.lock
+
+# Go
+vendor/
+
+# Environment
+.env
+*.env.local
+
+# Docker
+.dockerignore
+
+# Models (large binary files)
+models/*.bin
+models/*.pt
+models/*.ckpt
+*.safetensors
+
+# Database
+*.sql.bak
+postgres_data/
+redis_data/
+
+# Build artifacts
+*.o
+*.a
+*.so
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Logs
+*.log
+logs/
+
+# Blockchain build artifacts
+blockchain/artifacts/
+blockchain/cache/
+blockchain/typechain-types/

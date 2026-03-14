@@ -9,6 +9,8 @@ package polygon
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -134,7 +136,9 @@ func (c *Client) AnchorProof(ctx context.Context, proofHash, userID, verdict str
 //
 //	selector(4 bytes) + identityCommitment(32) + proofHash(32) + …
 func buildAnchorCallData(proofHash, userID, verdict string) string {
-	// anchorVerification selector (first 4 bytes of keccak256 of the signature)
+	// Placeholder function selector — replace with the real first 4 bytes of
+	// keccak256("anchorVerification(bytes32,bytes32,string,bool,string)")
+	// once the contract ABI is finalised.
 	selector := "0xa1b2c3d4"
 	padded := func(s string, size int) string {
 		h := fmt.Sprintf("%x", s)
@@ -154,12 +158,8 @@ func buildAnchorCallData(proofHash, userID, verdict string) string {
 // is not possible (e.g. no deployer key or RPC down).
 func deterministicTxHash(proofHash, userID, verdict string) string {
 	data := proofHash + ":" + userID + ":" + verdict
-	// Use a simple hash; crypto/sha256 is imported by callers if needed.
-	var h uint64
-	for _, b := range []byte(data) {
-		h = h*31 + uint64(b)
-	}
-	return fmt.Sprintf("0x%064x", h)
+	h := sha256.Sum256([]byte(data))
+	return "0x" + hex.EncodeToString(h[:])
 }
 
 // ── Types ──────────────────────────────────────────────────────────────────

@@ -201,7 +201,9 @@ def _audio_liveness(waveform: np.ndarray) -> float:
     """Estimate liveness from audio signal characteristics.
 
     Analyses three features of the waveform:
-      1. **RMS energy** — silence or near-silence indicates a non-live source.
+      1. **RMS energy** — prolonged silence across the entire analysed window
+         indicates a non-live source (momentary pauses within speech are
+         naturally averaged out by the 2-second sliding window).
       2. **Zero-crossing rate (ZCR)** — live speech exhibits moderate ZCR;
          pure tones or constant signals have extremely low or high ZCR.
       3. **Spectral flatness** — a perfectly flat spectrum (white noise) or a

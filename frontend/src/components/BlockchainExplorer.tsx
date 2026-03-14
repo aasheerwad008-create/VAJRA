@@ -26,7 +26,7 @@ export default function BlockchainExplorer({ txHash }: BlockchainExplorerProps) 
         </div>
         <div className="flex justify-between text-xs">
           <span className="text-gray-500">Contract</span>
-          <span className="text-vajra-accent">VajraTrustRegistry</span>
+          <span className="text-vajra-accent">KavachaTrustRegistry</span>
         </div>
         <div className="flex justify-between text-xs">
           <span className="text-gray-500">Status</span>

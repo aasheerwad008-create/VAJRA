@@ -31,11 +31,13 @@ type Config struct {
 
 // ipRateLimiter provides a simple in-memory, IP-based sliding-window rate
 // limiter.  Each IP is allowed `limit` requests per `window`.
+// Expired entries are lazily cleaned up every `window` period.
 type ipRateLimiter struct {
-	mu      sync.Mutex
-	clients map[string]*clientWindow
-	limit   int
-	window  time.Duration
+	mu        sync.Mutex
+	clients   map[string]*clientWindow
+	limit     int
+	window    time.Duration
+	lastClean time.Time
 }
 
 type clientWindow struct {
@@ -45,9 +47,10 @@ type clientWindow struct {
 
 func newIPRateLimiter(limit int, window time.Duration) *ipRateLimiter {
 	return &ipRateLimiter{
-		clients: make(map[string]*clientWindow),
-		limit:   limit,
-		window:  window,
+		clients:   make(map[string]*clientWindow),
+		limit:     limit,
+		window:    window,
+		lastClean: time.Now(),
 	}
 }
 
@@ -57,6 +60,17 @@ func (rl *ipRateLimiter) allow(ip string) bool {
 	defer rl.mu.Unlock()
 
 	now := time.Now()
+
+	// Periodic cleanup: remove expired entries to prevent unbounded growth.
+	if now.Sub(rl.lastClean) > rl.window {
+		for k, v := range rl.clients {
+			if now.After(v.expireAt) {
+				delete(rl.clients, k)
+			}
+		}
+		rl.lastClean = now
+	}
+
 	cw, ok := rl.clients[ip]
 	if !ok || now.After(cw.expireAt) {
 		rl.clients[ip] = &clientWindow{count: 1, expireAt: now.Add(rl.window)}

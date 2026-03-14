@@ -48,13 +48,15 @@ app.add_middleware(
 )
 
 _redis: Optional[aioredis.Redis] = None
+_shutdown_event: asyncio.Event = None  # type: ignore[assignment]
 
 
 @app.on_event("startup")
 async def startup():
-    global _redis
+    global _redis, _shutdown_event
     redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
     _redis = aioredis.from_url(redis_url, decode_responses=False)
+    _shutdown_event = asyncio.Event()
     # Start the background task worker.
     asyncio.create_task(_task_worker())
     log.info("adversarial_engine.ready")
@@ -62,6 +64,8 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
+    if _shutdown_event is not None:
+        _shutdown_event.set()
     if _redis:
         await _redis.aclose()
 
@@ -389,9 +393,10 @@ async def _task_worker() -> None:
     """
     Background coroutine that pulls perturbation tasks from a Redis list and
     processes them.  Results are stored in Redis keyed by task_id.
+    Exits gracefully when the shutdown event is set.
     """
     log.info("adversarial.task_worker.started")
-    while True:
+    while not (_shutdown_event is not None and _shutdown_event.is_set()):
         try:
             if _redis is None:
                 await asyncio.sleep(1)
@@ -455,6 +460,8 @@ async def _task_worker() -> None:
         except Exception as exc:
             log.error("adversarial.task_worker.error", error=str(exc))
             await asyncio.sleep(1)
+
+    log.info("adversarial.task_worker.stopped")
 
 
 def _decode_image_sync(raw_bytes: bytes) -> np.ndarray:

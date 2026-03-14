@@ -15,6 +15,8 @@ const (
 	maxRetries = 3
 	// baseDelay is the initial backoff delay between retries.
 	baseDelay = 500 * time.Millisecond
+	// maxDelay caps the exponential backoff to prevent unbounded wait times.
+	maxDelay = 5 * time.Second
 )
 
 // anchorToBlockchain anchors a ZK proof hash to the Polygon Amoy trust registry.
@@ -59,8 +61,11 @@ func anchorWithRetry(rpcURL, contractAddress, proofHash, userID, verdict string)
 		}
 		lastErr = err
 
-		// Exponential backoff: 500ms, 1s, 2s, ...
+		// Exponential backoff: 500ms, 1s, 2s, capped at maxDelay.
 		delay := time.Duration(float64(baseDelay) * math.Pow(2, float64(attempt)))
+		if delay > maxDelay {
+			delay = maxDelay
+		}
 		time.Sleep(delay)
 	}
 	return "", fmt.Errorf("all %d attempts failed: %w", maxRetries, lastErr)

@@ -83,18 +83,18 @@ def compute_eer(labels: np.ndarray, scores: np.ndarray) -> float:
     if len(labels) == 0:
         return 0.0
 
-    # Sort by score descending
-    desc = np.argsort(-scores)
-    labels_sorted = labels[desc]
-
     n_pos = int(labels.sum())
     n_neg = len(labels) - n_pos
     if n_pos == 0 or n_neg == 0:
         return 0.0
 
-    # Walk thresholds and find where FAR crosses FRR
+    # Compute FAR and FRR at every unique threshold
+    desc = np.argsort(-scores)
+    labels_sorted = labels[desc]
+
     tp = 0
-    best_eer = 1.0
+    prev_far, prev_frr = 0.0, 1.0
+
     for i in range(len(labels_sorted)):
         if labels_sorted[i] == 1:
             tp += 1
@@ -104,25 +104,21 @@ def compute_eer(labels: np.ndarray, scores: np.ndarray) -> float:
         far = fp / n_neg       # false acceptance rate
         frr = fn / n_pos       # false rejection rate
 
-        eer = (far + frr) / 2.0
-        if abs(far - frr) < abs(best_eer * 2 - (far + frr)):
-            best_eer = eer
-
+        # Check if FAR has crossed FRR (was below, now at or above)
         if far >= frr:
-            # Interpolate
-            if i > 0:
-                prev_fp = fp - (1 if labels_sorted[i] == 0 else 0)
-                prev_fn = fn + (1 if labels_sorted[i] == 1 else 0)
-                prev_far = prev_fp / n_neg
-                prev_frr = prev_fn / n_pos
-                if prev_frr != prev_far:
-                    alpha = (prev_frr - prev_far) / ((far - prev_far) + (prev_frr - frr))
-                    best_eer = prev_far + alpha * (far - prev_far)
+            # Linear interpolation to find the crossing point
+            denom = (far - prev_far) + (prev_frr - frr)
+            if denom > 0:
+                alpha = (prev_frr - prev_far) / denom
+                eer = prev_far + alpha * (far - prev_far)
             else:
-                best_eer = far
-            break
+                eer = far
+            return float(np.clip(eer, 0.0, 1.0))
 
-    return float(np.clip(best_eer, 0.0, 1.0))
+        prev_far, prev_frr = far, frr
+
+    # If we never crossed, return the last FAR (edge case)
+    return float(np.clip(prev_far, 0.0, 1.0))
 
 
 # ── Data helpers ───────────────────────────────────────────────────────────
@@ -281,9 +277,8 @@ def evaluate(
         total += labels.size(0)
 
         # Collect scores for EER — use spoof probability (class 1)
-        spoof_scores = probs[:, 1] if probs.shape[1] > 1 else probs[:, 0]
         all_labels.extend(labels.cpu().tolist())
-        all_scores.extend(spoof_scores.cpu().tolist())
+        all_scores.extend(probs[:, 1].cpu().tolist())
 
     avg_loss = running_loss / max(total, 1)
     accuracy = correct / max(total, 1)
@@ -404,7 +399,7 @@ def train_model(
         num_workers=num_workers,
     )
 
-    # ── Optimiser & scheduler ─────────────────────────────────────────
+    # ── Optimizer & scheduler ─────────────────────────────────────────
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=lr, weight_decay=weight_decay
     )

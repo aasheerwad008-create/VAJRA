@@ -97,6 +97,56 @@ Solidity smart contract `VajraTrustRegistry` deployed on Polygon Amoy Testnet:
 
 ---
 
+## ML Training
+
+The project includes a full training pipeline for the deepfake detection models. Both the **Spectrogram Classifier** (EfficientNet-B0) and the **Codec Artifact Detector** (1-D CNN) can be trained on the [ASVspoof 2024](https://www.asvspoof.org/) dataset.
+
+### Training Features
+
+- **AdamW** optimiser with cosine-annealing learning rate schedule
+- **Early stopping** to prevent overfitting
+- **Checkpoint management** — saves best model, periodic snapshots, and final weights
+- **Validation metrics** — accuracy, loss, and Equal Error Rate (EER)
+- **Training history** exported to JSON for analysis
+- **Resume support** — continue training from any checkpoint
+- **Data augmentation** — time-masking applied during training
+
+### Quick Train
+
+```bash
+cd voice-ai
+
+# Train the spectrogram classifier
+python train.py --model spectrogram --data-root /data/ASVspoof2024/LA --epochs 30
+
+# Train the codec artifact detector
+python train.py --model codec --data-root /data/ASVspoof2024/LA --epochs 30
+
+# Train both models sequentially
+python train.py --model all --data-root /data/ASVspoof2024/LA --epochs 30
+
+# Resume from a checkpoint
+python train.py --model spectrogram --data-root /data/ASVspoof2024/LA --resume checkpoints/spec_best.pt
+```
+
+### Training CLI Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--model` | `all` | `spectrogram`, `codec`, or `all` |
+| `--data-root` | *(required)* | Path to ASVspoof 2024 `LA/` directory |
+| `--epochs` | `30` | Maximum training epochs |
+| `--batch-size` | `32` | Mini-batch size |
+| `--lr` | `3e-4` | Peak learning rate |
+| `--weight-decay` | `1e-4` | AdamW weight decay |
+| `--checkpoint-dir` | `checkpoints` | Output directory for model weights |
+| `--resume` | — | Path to checkpoint to resume from |
+| `--patience` | `7` | Early-stopping patience (epochs) |
+
+After training, use `python -m models.export --weights-dir checkpoints` to convert the trained models to ONNX format for production deployment.
+
+---
+
 ## Quick Start
 
 ### Prerequisites
@@ -248,12 +298,16 @@ vajra/
 ├── voice-ai/                   # Layer 1A: AI deepfake detection
 │   ├── Dockerfile
 │   ├── main.py                 # FastAPI service
+│   ├── train.py                # ML training pipeline
 │   ├── schemas.py              # Pydantic models
 │   ├── storage.py              # PostgreSQL embedding store
 │   ├── requirements.txt
-│   └── models/
-│       ├── ensemble.py         # Three-model weighted ensemble
-│       └── speaker.py          # ECAPA-TDNN speaker embedder
+│   ├── models/
+│   │   ├── ensemble.py         # Three-model weighted ensemble
+│   │   ├── speaker.py          # ECAPA-TDNN speaker embedder
+│   │   └── export.py           # ONNX model export utility
+│   └── data/
+│       └── asvspoof.py         # ASVspoof 2024 dataset loader
 │
 ├── adversarial-engine/         # Layer 1B: Adversarial video shield + rPPG
 │   ├── Dockerfile

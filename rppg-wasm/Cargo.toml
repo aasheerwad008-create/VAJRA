@@ -1,0 +1,26 @@
+[package]
+name = "rppg-wasm"
+version = "1.0.0"
+edition = "2021"
+description = "VAJRA rPPG liveness detector compiled to WebAssembly"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+serde_json = "1"
+getrandom = { version = "0.2", features = ["js"] }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[profile.release]
+opt-level = "s"      # Optimise for size (smaller .wasm)
+lto = true
+codegen-units = 1
+panic = "abort"      # Remove panic machinery for smaller binary

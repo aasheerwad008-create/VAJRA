@@ -1,0 +1,14 @@
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+python-multipart==0.0.22
+pydantic==2.7.1
+
+# Computer vision
+opencv-python-headless==4.9.0.80
+numpy==1.26.4
+Pillow==12.1.1
+
+# Cache
+redis[asyncio]==5.0.6
+
+structlog==24.2.0

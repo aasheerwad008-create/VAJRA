@@ -51,11 +51,19 @@ services:
         condition: service_healthy
     volumes:
       - voice_models:/app/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
       interval: 30s
       timeout: 10s
-      retries: 3
+      retries: 5
+      start_period: 120s
 
   # ── Adversarial Engine ────────────────────────────────────────────────────
   adversarial-engine:
@@ -70,11 +78,19 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
       interval: 30s
       timeout: 10s
-      retries: 3
+      retries: 5
+      start_period: 60s
 
   # ── ZK Proof System ───────────────────────────────────────────────────────
   zk-proof-system:
@@ -110,6 +126,7 @@ services:
       ADVERSARIAL_URL: http://adversarial-engine:8002
       ZK_PROOF_URL: http://zk-proof-system:8003
       POLYGON_RPC_URL: ${POLYGON_AMOY_RPC_URL:-https://rpc-amoy.polygon.technology}
+      POLYGON_FALLBACK_RPC_URL: ${POLYGON_FALLBACK_RPC_URL:-https://polygon-amoy-bor-rpc.publicnode.com}
       TRUST_REGISTRY_ADDRESS: ${TRUST_REGISTRY_ADDRESS:-0x0000000000000000000000000000000000000000}
     ports:
       - "8080:8080"

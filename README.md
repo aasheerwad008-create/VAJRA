@@ -291,7 +291,9 @@ curl -X POST http://localhost:8001/api/voice/verify \
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/adversarial/perturb-frame` | Apply adversarial perturbation to video frame |
+| `POST` | `/api/adversarial/perturb-frame` | Apply adversarial perturbation to video frame (synchronous) |
+| `POST` | `/api/adversarial/perturb-frame/async` | Submit perturbation job to background queue |
+| `GET` | `/api/adversarial/task/{task_id}` | Poll async task result |
 | `POST` | `/api/liveness/rppg` | rPPG liveness detection from frames |
 
 **Perturb frame:**
@@ -358,6 +360,52 @@ The Next.js dashboard at `http://localhost:3000` provides:
 | Voice verification latency | < 2 seconds |
 | ZK proof generation | < 1 second |
 | Blockchain confirmation | < 3 seconds (Polygon Amoy) |
+
+---
+
+## Infrastructure & Production Hardening
+
+### GPU Acceleration
+
+The `docker-compose.yml` reserves NVIDIA GPUs for compute-heavy AI containers (`voice-ai`, `adversarial-engine`). Docker will gracefully fall back to CPU if no GPU is available.
+
+```yaml
+deploy:
+  resources:
+    reservations:
+      devices:
+        - driver: nvidia
+          count: 1
+          capabilities: [gpu]
+```
+
+### Rate Limiting
+
+The Go backend includes IP-based rate limiting middleware:
+
+| Scope | Limit |
+|-------|-------|
+| Global (all endpoints) | 100 requests/minute per IP |
+| AI-heavy endpoints (`/api/adversarial/*`) | 20 requests/minute per IP |
+
+Exceeding the limit returns `429 Too Many Requests`.
+
+### Blockchain Retry & Fallback RPC
+
+Blockchain anchoring uses **exponential back-off retries** (up to 3 attempts) and supports a **fallback RPC URL** via `POLYGON_FALLBACK_RPC_URL`. If the primary Polygon Amoy endpoint goes down, the system automatically switches to the fallback.
+
+### Async Task Processing
+
+The adversarial engine supports asynchronous processing for heavy compute jobs:
+
+1. Submit a job: `POST /api/adversarial/perturb-frame/async` → returns `{ task_id, status: "queued" }`
+2. Poll for result: `GET /api/adversarial/task/{task_id}` → returns `{ task_id, status, result }`
+
+Tasks are queued in Redis and processed by a background worker. Results expire after 10 minutes.
+
+### Health Check Tuning
+
+AI containers have extended `start_period` values (120s for voice-ai, 60s for adversarial-engine) to allow time for PyTorch model loading before Docker marks them as unhealthy.
 
 ---
 
@@ -445,6 +493,8 @@ vajra/
 - Blockchain records contain only hashes — no PII on-chain
 - JWT authentication on backend API endpoints
 - Docker network isolation between services
+- **IP-based rate limiting** on all endpoints (100 req/min global, 20 req/min for AI endpoints)
+- Environment-driven secret management (`.env` excluded from version control)
 
 ---
 

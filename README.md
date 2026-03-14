@@ -99,34 +99,77 @@ Solidity smart contract `VajraTrustRegistry` deployed on Polygon Amoy Testnet:
 
 ## ML Training
 
-The project includes a full training pipeline for the deepfake detection models. Both the **Spectrogram Classifier** (EfficientNet-B0) and the **Codec Artifact Detector** (1-D CNN) can be trained on the [ASVspoof 2024](https://www.asvspoof.org/) dataset.
+The project includes a production-grade training pipeline for the deepfake detection models using **pretrained + fine-tuning transfer learning**. Both the **Spectrogram Classifier** (EfficientNet-B0) and the **Codec Artifact Detector** (1-D CNN) can be trained on the [ASVspoof 2024](https://www.asvspoof.org/) dataset.
+
+### Training Strategy: Pretrained + Fine-Tuning
+
+The spectrogram model uses **two-stage transfer learning** for faster convergence and better accuracy:
+
+| Stage | Strategy | Learning Rate | Epochs |
+|-------|----------|---------------|--------|
+| Stage 1 | Freeze EfficientNet-B0 backbone (ImageNet weights), train classifier head only | 1e-4 | 10 |
+| Stage 2 | Unfreeze last backbone layers, fine-tune entire network | 1e-5 (backbone), 1e-4 (head) | 5 |
 
 ### Training Features
 
-- **AdamW** optimiser with cosine-annealing learning rate schedule
+- **Pretrained + fine-tuning** transfer learning (ImageNet → deepfake detection)
+- **Mixed precision training** (torch.cuda.amp) for GPU acceleration
+- **Gradient clipping** for stable training
+- **AdamW** optimizer with cosine-annealing learning rate schedule
 - **Early stopping** to prevent overfitting
 - **Checkpoint management** — saves best model, periodic snapshots, and final weights
-- **Validation metrics** — accuracy, loss, and Equal Error Rate (EER)
-- **Training history** exported to JSON for analysis
+- **Comprehensive metrics** — accuracy, precision, recall, F1, ROC-AUC, EER
+- **Data loader prefetching** with pinned memory for throughput
+- **Advanced augmentations** — Gaussian noise, pitch shift, time stretch, reverb, time masking
+- **Experiment tracking** — JSON-based experiment logs with system metadata
 - **Resume support** — continue training from any checkpoint
-- **Data augmentation** — time-masking applied during training
+- **Model export** — PyTorch (.pt) and ONNX (.onnx) formats
 
 ### Quick Train
 
 ```bash
 cd voice-ai
 
-# Train the spectrogram classifier
-python train.py --model spectrogram --data-root /data/ASVspoof2024/LA --epochs 30
+# Train spectrogram model (pretrained + fine-tuning, recommended)
+python train.py --model spectrogram --data-root /data/ASVspoof2024/LA
 
-# Train the codec artifact detector
-python train.py --model codec --data-root /data/ASVspoof2024/LA --epochs 30
+# Train codec detector
+python train.py --model codec --data-root /data/ASVspoof2024/LA
 
-# Train both models sequentially
-python train.py --model all --data-root /data/ASVspoof2024/LA --epochs 30
+# Train both models
+python train.py --model all --data-root /data/ASVspoof2024/LA
+
+# Full pipeline: train → evaluate → export
+python train.py --model all --data-root /data/ASVspoof2024/LA --full-pipeline
+
+# Legacy from-scratch training (no pretrained weights)
+python train.py --model spectrogram --data-root /data/ASVspoof2024/LA --no-pretrained --epochs 30
 
 # Resume from a checkpoint
 python train.py --model spectrogram --data-root /data/ASVspoof2024/LA --resume checkpoints/spec_best.pt
+```
+
+### Individual Training Scripts
+
+```bash
+cd voice-ai
+
+# Train spectrogram model with custom stage settings
+python -m training.train_spectrogram --data-root /data/ASVspoof2024/LA \
+    --stage1-epochs 10 --stage2-epochs 5
+
+# Train codec detector
+python -m training.train_codec --data-root /data/ASVspoof2024/LA --epochs 15
+
+# Master pipeline (all steps)
+python -m training.train_all --data-root /data/ASVspoof2024/LA
+
+# Evaluate trained models
+python -m evaluation.evaluate_models --data-root /data/ASVspoof2024/LA \
+    --checkpoint-dir checkpoints
+
+# Export models to PyTorch + ONNX
+python -m export.export_models --checkpoint-dir checkpoints --output-dir models
 ```
 
 ### Training CLI Options
@@ -135,15 +178,46 @@ python train.py --model spectrogram --data-root /data/ASVspoof2024/LA --resume c
 |------|---------|-------------|
 | `--model` | `all` | `spectrogram`, `codec`, or `all` |
 | `--data-root` | *(required)* | Path to ASVspoof 2024 `LA/` directory |
-| `--epochs` | `30` | Maximum training epochs |
+| `--epochs` | `30` | Maximum training epochs (legacy mode) |
 | `--batch-size` | `32` | Mini-batch size |
 | `--lr` | `3e-4` | Peak learning rate |
 | `--weight-decay` | `1e-4` | AdamW weight decay |
 | `--checkpoint-dir` | `checkpoints` | Output directory for model weights |
 | `--resume` | — | Path to checkpoint to resume from |
 | `--patience` | `7` | Early-stopping patience (epochs) |
+| `--no-pretrained` | — | Use from-scratch training (legacy mode) |
+| `--full-pipeline` | — | Run train → evaluate → export |
 
-After training, use `python -m models.export --weights-dir checkpoints` to convert the trained models to ONNX format for production deployment.
+After training, use `python -m export.export_models --checkpoint-dir checkpoints` to convert the trained models to ONNX format for production deployment.
+
+### Training Pipeline Architecture
+
+```
+voice-ai/
+├── datasets/                  # Dataset download & preparation
+│   ├── download_datasets.py   # Multi-dataset download automation
+│   └── dataset_builder.py     # Unified real/fake dataset builder
+├── preprocessing/             # Audio preprocessing
+│   ├── audio_processor.py     # Resample, normalize, trim/pad
+│   ├── spectrogram_generator.py  # 128×128 mel spectrogram
+│   └── augmentations.py       # Noise, pitch, stretch, reverb
+├── models/
+│   ├── spectrogram_model.py   # Pretrained EfficientNet-B0 (freeze/unfreeze)
+│   ├── codec_detector.py      # 1-D CNN codec artifact detector
+│   └── ensemble.py            # Runtime ensemble (unchanged)
+├── training/                  # Training pipeline
+│   ├── trainer.py             # Core engine (AMP, grad clip, early stop)
+│   ├── train_spectrogram.py   # Two-stage transfer learning
+│   ├── train_codec.py         # Codec detector training
+│   └── train_all.py           # Master pipeline script
+├── evaluation/                # Model evaluation
+│   ├── metrics.py             # Accuracy, F1, ROC-AUC, EER
+│   └── evaluate_models.py     # Checkpoint evaluation
+├── experiments/               # Experiment tracking
+│   └── experiment_logger.py   # JSON-based experiment logs
+└── export/                    # Model export
+    └── export_models.py       # PyTorch + ONNX export
+```
 
 ---
 

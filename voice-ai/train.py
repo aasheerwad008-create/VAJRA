@@ -1,21 +1,34 @@
 """
 VAJRA Voice AI — Model Training Pipeline.
 
-Trains the SpectrogramClassifier and CodecArtifactDetector on the
-ASVspoof 2024 dataset for deepfake speech detection.
+Trains the SpectrogramClassifier and CodecArtifactDetector for
+deepfake speech detection.
+
+This module supports two training strategies:
+
+1. **Pretrained + Fine-Tuning** (default, recommended):
+   Uses ImageNet-pretrained EfficientNet-B0 with two-stage transfer learning.
+   Stage 1: Freeze backbone, train classifier head (10 epochs, lr=1e-4).
+   Stage 2: Unfreeze last layers, fine-tune all (5 epochs, lr=1e-5).
+
+2. **Legacy from-scratch** training:
+   Train all parameters from random initialization (for benchmarking).
 
 Usage:
-    # Train the spectrogram classifier
-    python train.py --model spectrogram --data-root /data/ASVspoof2024/LA --epochs 30
+    # Pretrained + fine-tuning (recommended)
+    python train.py --model spectrogram --data-root /data/ASVspoof2024/LA
 
-    # Train the codec artifact detector
-    python train.py --model codec --data-root /data/ASVspoof2024/LA --epochs 30
+    # Train codec detector
+    python train.py --model codec --data-root /data/ASVspoof2024/LA
 
-    # Train both models sequentially
-    python train.py --model all --data-root /data/ASVspoof2024/LA --epochs 30
+    # Train both models
+    python train.py --model all --data-root /data/ASVspoof2024/LA
 
-    # Resume training from a checkpoint
-    python train.py --model spectrogram --data-root /data/ASVspoof2024/LA --resume checkpoints/spec_best.pt
+    # Full pipeline (train + evaluate + export)
+    python train.py --model all --data-root /data/ASVspoof2024/LA --full-pipeline
+
+    # Legacy from-scratch mode
+    python train.py --model spectrogram --data-root /data/ASVspoof2024/LA --no-pretrained
 """
 from __future__ import annotations
 
@@ -209,9 +222,11 @@ def train_one_epoch(
     criterion: nn.Module,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
+    scaler: Optional[torch.amp.GradScaler] = None,
+    grad_clip_norm: float = 1.0,
 ) -> Tuple[float, float]:
     """
-    Run one training epoch.
+    Run one training epoch with mixed precision and gradient clipping.
 
     Returns
     -------
@@ -221,16 +236,29 @@ def train_one_epoch(
     running_loss = 0.0
     correct = 0
     total = 0
+    use_amp = scaler is not None
 
     for waveforms, labels in loader:
-        waveforms = waveforms.to(device)
-        labels = labels.to(device)
+        waveforms = waveforms.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
 
-        optimizer.zero_grad()
-        logits = model(waveforms)
-        loss = criterion(logits, labels)
-        loss.backward()
-        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+
+        if use_amp:
+            with torch.amp.autocast("cuda"):
+                logits = model(waveforms)
+                loss = criterion(logits, labels)
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            logits = model(waveforms)
+            loss = criterion(logits, labels)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
+            optimizer.step()
 
         running_loss += loss.item() * labels.size(0)
         preds = logits.argmax(dim=-1)
@@ -345,7 +373,7 @@ def train_model(
     patience: int = 7,
 ) -> List[EpochMetrics]:
     """
-    Train a single model and return per-epoch metrics.
+    Train a single model (legacy from-scratch mode) and return per-epoch metrics.
 
     Parameters
     ----------
@@ -408,6 +436,10 @@ def train_model(
     )
     criterion = nn.CrossEntropyLoss()
 
+    # ── Mixed precision ───────────────────────────────────────────────
+    use_amp = device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda") if use_amp else None
+
     # ── Resume ────────────────────────────────────────────────────────
     start_epoch = 0
     if resume:
@@ -433,7 +465,8 @@ def train_model(
         t0 = time.perf_counter()
 
         train_loss, train_acc = train_one_epoch(
-            model, train_loader, criterion, optimizer, device
+            model, train_loader, criterion, optimizer, device,
+            scaler=scaler, grad_clip_norm=1.0,
         )
         val_loss, val_acc, val_eer = evaluate(model, val_loader, criterion, device)
         scheduler.step()
@@ -595,15 +628,74 @@ def _main() -> None:
         default=7,
         help="Early-stopping patience in epochs (default: 7)",
     )
+    parser.add_argument(
+        "--no-pretrained",
+        action="store_true",
+        help="Use from-scratch training (legacy mode, no pretrained weights)",
+    )
+    parser.add_argument(
+        "--full-pipeline",
+        action="store_true",
+        help="Run full pipeline: train → evaluate → export",
+    )
     args = parser.parse_args()
 
+    # ── Pretrained + fine-tuning (new default) ────────────────────────
+    if not args.no_pretrained and not args.full_pipeline:
+        log.info("Using pretrained + fine-tuning training strategy")
+        log.info("(Use --no-pretrained for legacy from-scratch mode)")
+
+        if args.model in ("spectrogram", "all"):
+            from training.train_spectrogram import train_spectrogram
+
+            log.info("=" * 60)
+            log.info("Training: spectrogram (pretrained + fine-tuning)")
+            log.info("=" * 60)
+            train_spectrogram(
+                data_root=args.data_root,
+                batch_size=args.batch_size,
+                checkpoint_dir=args.checkpoint_dir,
+                num_workers=args.num_workers,
+                patience=args.patience,
+                resume=args.resume if args.model == "spectrogram" else None,
+            )
+
+        if args.model in ("codec", "all"):
+            from training.train_codec import train_codec
+
+            log.info("=" * 60)
+            log.info("Training: codec")
+            log.info("=" * 60)
+            train_codec(
+                data_root=args.data_root,
+                batch_size=args.batch_size,
+                checkpoint_dir=args.checkpoint_dir,
+                num_workers=args.num_workers,
+                patience=args.patience,
+                resume=args.resume if args.model == "codec" else None,
+            )
+        return
+
+    # ── Full pipeline mode ────────────────────────────────────────────
+    if args.full_pipeline:
+        from training.train_all import run_full_pipeline
+
+        run_full_pipeline(
+            data_root=args.data_root,
+            batch_size=args.batch_size,
+            checkpoint_dir=args.checkpoint_dir,
+            num_workers=args.num_workers,
+        )
+        return
+
+    # ── Legacy from-scratch mode ──────────────────────────────────────
     models_to_train = (
         ["spectrogram", "codec"] if args.model == "all" else [args.model]
     )
 
     for name in models_to_train:
         log.info("=" * 60)
-        log.info("Training: %s", name)
+        log.info("Training: %s (from-scratch)", name)
         log.info("=" * 60)
         train_model(
             model_name=name,

@@ -31,7 +31,13 @@ vendor/
 models/*.bin
 models/*.pt
 models/*.ckpt
+models/*.onnx
+models/manifest.json
 *.safetensors
+
+# Training artifacts
+checkpoints/
+experiments/logs/
 
 # Database
 *.sql.bak

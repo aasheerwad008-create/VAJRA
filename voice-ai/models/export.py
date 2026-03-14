@@ -138,6 +138,72 @@ def export_speaker_embedder(
         log.warning("Could not export SpeakerEmbedder: %s (skipping)", exc)
 
 
+def export_ecapa_tdnn_classifier(
+    model: nn.Module,
+    output_path: str | Path,
+    opset_version: int = 17,
+) -> None:
+    """
+    Export the ECAPA-TDNN anti-spoofing classifier to ONNX.
+
+    Uses the lightweight TDNN fallback for ONNX-compatible export.
+
+    Input shape:  (batch, num_samples)
+    Output shape: (batch, 2)  — [p_real, p_fake] logits
+    """
+    model.eval()
+    dummy = torch.zeros(1, CHUNK_SAMPLES, dtype=torch.float32)
+    try:
+        torch.onnx.export(
+            model,
+            dummy,
+            str(output_path),
+            opset_version=opset_version,
+            input_names=["waveform"],
+            output_names=["logits"],
+            dynamic_axes={
+                "waveform": {0: "batch"},
+                "logits": {0: "batch"},
+            },
+            do_constant_folding=True,
+        )
+        log.info("Exported ECAPATDNNClassifier → %s", output_path)
+    except Exception as exc:
+        log.warning("Could not export ECAPATDNNClassifier: %s (skipping)", exc)
+
+
+def export_rawnet2(
+    model: nn.Module,
+    output_path: str | Path,
+    opset_version: int = 17,
+) -> None:
+    """
+    Export the RawNet2 anti-spoofing model to ONNX.
+
+    Input shape:  (batch, num_samples)
+    Output shape: (batch, 2)  — [p_real, p_fake] logits
+    """
+    model.eval()
+    dummy = torch.zeros(1, CHUNK_SAMPLES, dtype=torch.float32)
+    try:
+        torch.onnx.export(
+            model,
+            dummy,
+            str(output_path),
+            opset_version=opset_version,
+            input_names=["waveform"],
+            output_names=["logits"],
+            dynamic_axes={
+                "waveform": {0: "batch"},
+                "logits": {0: "batch"},
+            },
+            do_constant_folding=True,
+        )
+        log.info("Exported RawNet2 → %s", output_path)
+    except Exception as exc:
+        log.warning("Could not export RawNet2: %s (skipping)", exc)
+
+
 # ── Bulk export ────────────────────────────────────────────────────────────
 
 def export_all_models(
@@ -145,7 +211,7 @@ def export_all_models(
     weights_dir: Optional[str | Path] = None,
 ) -> None:
     """
-    Export all three ensemble models to ONNX in *output_dir*.
+    Export all ensemble models to ONNX in *output_dir*.
 
     Parameters
     ----------
@@ -153,15 +219,18 @@ def export_all_models(
         Directory where .onnx files will be written.
     weights_dir:
         Optional directory containing pre-trained PyTorch weight files
-        (``spec_classifier.pt``, ``codec_detector.pt``).
+        (``spec_classifier.pt``, ``codec_detector.pt``,
+         ``ecapa_tdnn.pt``, ``rawnet2.pt``).
         If None, random weights are used (for CI / shape validation only).
     """
     from models.ensemble import SpectrogramClassifier, CodecArtifactDetector
+    from models.ecapa_tdnn import ECAPATDNNClassifier
+    from models.rawnet2 import RawNet2
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    # ── Spectrogram Classifier ────────────────────────────────────────────
+    # ── Spectrogram Classifier (EfficientNet-B0) ─────────────────────────
     spec_model = SpectrogramClassifier()
     if weights_dir:
         ckpt = Path(weights_dir) / "spec_classifier.pt"
@@ -183,8 +252,30 @@ def export_all_models(
             log.info("Loaded CodecArtifactDetector weights from %s", ckpt)
     export_codec_detector(codec_model, out / "codec_detector.onnx")
 
-    # ── Speaker Embedder ─────────────────────────────────────────────────
+    # ── Speaker Embedder (ECAPA-TDNN) ────────────────────────────────────
     export_speaker_embedder(out / "speaker_embedder.onnx")
+
+    # ── ECAPA-TDNN Anti-Spoofing Classifier ──────────────────────────────
+    ecapa_model = ECAPATDNNClassifier(num_classes=2, pretrained=False)
+    if weights_dir:
+        ckpt = Path(weights_dir) / "ecapa_tdnn.pt"
+        if ckpt.exists():
+            ecapa_model.load_state_dict(
+                torch.load(str(ckpt), map_location="cpu", weights_only=True)
+            )
+            log.info("Loaded ECAPATDNNClassifier weights from %s", ckpt)
+    export_ecapa_tdnn_classifier(ecapa_model, out / "ecapa_tdnn_classifier.onnx")
+
+    # ── RawNet2 Anti-Spoofing Model ──────────────────────────────────────
+    rawnet2_model = RawNet2(num_classes=2)
+    if weights_dir:
+        ckpt = Path(weights_dir) / "rawnet2.pt"
+        if ckpt.exists():
+            rawnet2_model.load_state_dict(
+                torch.load(str(ckpt), map_location="cpu", weights_only=True)
+            )
+            log.info("Loaded RawNet2 weights from %s", ckpt)
+    export_rawnet2(rawnet2_model, out / "rawnet2.onnx")
 
     log.info("All models exported to %s", out)
     _write_manifest(out)
